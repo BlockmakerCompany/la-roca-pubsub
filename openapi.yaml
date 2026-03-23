@@ -1,0 +1,205 @@
+openapi: 3.0.3
+info:
+  title: La Roca Micro-PubSub API
+  description: >
+    Zero-allocation, zero-copy, and lock-free Publish/Subscribe engine written in x86_64 Assembly.
+    Provides ultra-low latency message brokering using memory-mapped files (mmap) and hardware-level atomic operations.
+    Features dynamic Named Topics with Auto-Provisioning, O(log N) Binary Search resolution, and Batch Consumption.
+  version: 1.2.0
+  contact:
+    name: Engineering Team
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+paths:
+  /live:
+    get:
+      summary: System Healthcheck
+      description: Returns a simple 200 OK to verify the HTTP server is accepting TCP connections.
+      operationId: checkLiveness
+      responses:
+        '200':
+          description: The engine is alive and ready.
+
+  /stats:
+    get:
+      summary: System Metrics & Telemetry
+      description: Returns real-time metrics, Ring Buffer geometries, and engine status in JSON format.
+      operationId: getStats
+      responses:
+        '200':
+          description: A JSON object containing engine statistics.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  engine:
+                    type: string
+                    example: "lock-free"
+                  uptime:
+                    type: integer
+                  topics_active:
+                    type: integer
+
+  /pub/{topic_name}:
+    post:
+      summary: Publish a Message
+      description: >
+        Injects a payload into the specified topic's Lock-Free Ring Buffer.
+        If the topic does not exist, the engine will safely Auto-Provision it on disk and memory in < 1ms.
+        The payload size must not exceed the configured `rt_msg_size` (minus metadata headers).
+      operationId: publishMessage
+      parameters:
+        - name: topic_name
+          in: path
+          required: true
+          description: An alphanumeric topic name (up to 16 bytes).
+          schema:
+            type: string
+            pattern: '^[a-zA-Z0-9_-]{1,16}$'
+            example: "ticker_btc"
+      requestBody:
+        required: true
+        description: The raw binary or text payload to be published.
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+          text/plain:
+            schema:
+              type: string
+              example: "Trade_Order_BTC_72000"
+      responses:
+        '200':
+          description: Message successfully committed to the Ring Buffer (and topic created if new).
+        '400':
+          description: Bad Request (e.g., Topic name exceeds 16 bytes).
+        '500':
+          description: Internal Error or Buffer Full (Backpressure).
+  /mpub/{topic_name}:
+    post:
+      summary: Publish Messages in Batch (Multi-Publish)
+      description: >
+        Injects multiple payloads into the specified topic's Lock-Free Ring Buffer in a single network round-trip.
+        Payloads must be delimited by a newline character (`\n`). The engine scans the payload at the hardware level 
+        (Zero-Allocation) and commits each line as an individual, immutable message.
+        If the topic does not exist, it will be Auto-Provisioned.
+      operationId: multiPublishMessage
+      parameters:
+        - name: topic_name
+          in: path
+          required: true
+          description: An alphanumeric topic name (up to 16 bytes).
+          schema:
+            type: string
+            pattern: '^[a-zA-Z0-9_-]{1,16}$'
+            example: "ticker_btc"
+      requestBody:
+        required: true
+        description: A concatenated stream of messages separated by `\n`.
+        content:
+          text/plain:
+            schema:
+              type: string
+              example: "Precio: 65000\nPrecio: 65100\nPrecio: 65050"
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: All messages successfully parsed and committed to the Ring Buffer.
+        '400':
+          description: Bad Request (e.g., Topic name exceeds 16 bytes).
+        '500':
+          description: Internal Error or Buffer Full (Backpressure) during batch insertion.
+  /sub/{topic_name}/{sequence_id}:
+    get:
+      summary: Consume a Single Message
+      description: >
+        Reads a single message from the Ring Buffer at O(1) complexity using the exact sequence offset.
+        Topics are resolved via O(log N) Binary Search. If the topic is not in the L1 registry, it attempts a Lazy-Load from disk.
+      operationId: consumeMessage
+      parameters:
+        - name: topic_name
+          in: path
+          required: true
+          description: An alphanumeric topic name (up to 16 bytes).
+          schema:
+            type: string
+            pattern: '^[a-zA-Z0-9_-]{1,16}$'
+            example: "ticker_btc"
+        - name: sequence_id
+          in: path
+          required: true
+          description: The exact sequence number (0-indexed) to read.
+          schema:
+            type: integer
+            minimum: 0
+            example: 0
+      responses:
+        '200':
+          description: The requested message payload.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Bad Request (Invalid topic name or non-numeric sequence).
+        '404':
+          description: Message not ready yet (Sequence does not exist) or Buffer Empty.
+        '500':
+          description: OS Error or Memory Mapping failure.
+
+  /batch/{topic_name}/{sequence_id}/{batch_size}:
+    get:
+      summary: Consume Messages in Batch
+      description: >
+        Sequentially reads up to `batch_size` messages starting from `sequence_id` in a single network round-trip.
+        Messages are returned concatenated and separated by a newline (`\n`) character.
+        If fewer messages than `batch_size` are available, it returns whatever is currently ready in the Ring Buffer.
+      operationId: consumeBatch
+      parameters:
+        - name: topic_name
+          in: path
+          required: true
+          description: An alphanumeric topic name (up to 16 bytes).
+          schema:
+            type: string
+            pattern: '^[a-zA-Z0-9_-]{1,16}$'
+            example: "ticker_btc"
+        - name: sequence_id
+          in: path
+          required: true
+          description: The starting sequence number (0-indexed) to read.
+          schema:
+            type: integer
+            minimum: 0
+            example: 0
+        - name: batch_size
+          in: path
+          required: true
+          description: The maximum number of messages to read in this batch.
+          schema:
+            type: integer
+            minimum: 1
+            example: 50
+      responses:
+        '200':
+          description: A concatenated stream of messages separated by `\n`.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Bad Request (Invalid parameters).
+        '404':
+          description: The starting sequence does not exist yet.
+        '500':
+          description: OS Error or Memory Mapping failure.

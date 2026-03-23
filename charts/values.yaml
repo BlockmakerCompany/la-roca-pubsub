@@ -1,0 +1,35 @@
+# -- Engine Configuration --
+engine:
+  replicaCount: 3
+  image:
+    repository: blockmaker/la-roca-pubsub
+    tag: latest
+    pullPolicy: Always
+
+  # Dynamic Geometry configured via env vars
+  config:
+    msgSize: "256"
+    maxMsgs: "262143"
+
+  resources:
+    limits:
+      cpu: "1000m"
+      memory: "256Mi"
+    requests:
+      cpu: "500m"
+      memory: "128Mi"
+
+  persistence:
+    enabled: true
+    accessMode: ReadWriteOnce
+    size: 10Gi
+
+# -- Envoy Front-Proxy Configuration --
+envoy:
+  replicaCount: 2
+  image:
+    repository: envoyproxy/envoy
+    tag: v1.27.0
+  service:
+    type: LoadBalancer # Change to ClusterIP if behind an Ingress
+    port: 8080

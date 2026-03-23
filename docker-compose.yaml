@@ -1,0 +1,48 @@
+# =============================================================================
+# Docker Compose for La Roca Micro-PubSub Architecture
+# Project: La Roca Micro-PubSub
+# Responsibility: High-Performance Orchestration for Assembly-based systems.
+# =============================================================================
+name: la-roca-ecosystem
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1. The Core Engine: Assembly Zero-Copy Pub/Sub
+  # ---------------------------------------------------------------------------
+  pubsub-engine:
+    image: blockmaker/la-roca-pubsub
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pubsub-engine
+    ports:
+      - "8080:8080"
+    environment:
+      # --- Dynamic Geometry Configuration ---
+      # These values define the O(1) Ring Buffer size for NEW topics.
+      # Note: Existing topics will ignore these due to "Disk Authority".
+      - ROCK_MSG_SIZE=1024       # 1KB per message payload
+      - ROCK_MAX_MSGS=1000000    # 1 Million messages per topic (~1GB file)
+    volumes:
+      # Persist the memory-mapped (.log) ring buffers to the host machine
+      - pubsub_data:/app/topics
+    restart: unless-stopped
+    # Engineering Tip: For maximum performance, pin the container to a specific
+    # physical CPU core to avoid L1/L2 cache context switching.
+    # cpuset: "0"
+
+  # ---------------------------------------------------------------------------
+  # 2. Example Client: A Go Microservice (Producer/Consumer)
+  # ---------------------------------------------------------------------------
+  go-client:
+    image: golang:1.22-alpine
+    container_name: pubsub-go-client
+    depends_on:
+      - pubsub-engine
+    command: tail -f /dev/null
+    environment:
+      - PUBSUB_HOST=http://pubsub-engine:8080
+
+volumes:
+  pubsub_data:
+    name: pubsub_persistent_storage

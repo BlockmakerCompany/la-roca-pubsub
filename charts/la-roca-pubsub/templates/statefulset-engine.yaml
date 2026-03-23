@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-engine
+spec:
+  serviceName: {{ .Release.Name }}-headless
+  replicas: {{ .Values.engine.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-engine
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-engine
+    spec:
+      containers:
+          - name: pubsub-engine
+            image: "{{ .Values.engine.image.repository }}:{{ .Values.engine.image.tag }}"
+            imagePullPolicy: {{ .Values.engine.image.pullPolicy }}
+            ports:
+              - containerPort: 8080
+            env:
+              - name: ROCK_MSG_SIZE
+                value: {{ .Values.engine.config.msgSize | quote }}
+              - name: ROCK_MAX_MSGS
+                value: {{ .Values.engine.config.maxMsgs | quote }}
+            volumeMounts:
+              - name: topic-data
+                mountPath: /app/topics
+            resources:
+              {{- toYaml .Values.engine.resources | nindent 12 }}
+  {{- if .Values.engine.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: topic-data
+      spec:
+        accessModes: [ "{{ .Values.engine.persistence.accessMode }}" ]
+        resources:
+          requests:
+            storage: {{ .Values.engine.persistence.size }}
+  {{- end }}

@@ -1,0 +1,51 @@
+# =============================================================================
+# Project: La Roca Micro-PubSub
+# Responsibility: Standard exclusion list for x86_64 Assembly projects.
+# =============================================================================
+
+# --- Build Artifacts & Objects ---
+# Ignore compiler output directories and the final engine binary
+bin/
+build/
+*.o
+*.obj
+la-roca-engine
+
+# --- Engine Data (Mission Critical) ---
+# Log files represent the memory-mapped (mmap) segments.
+# Avoid committing gigabytes of pre-allocated test data to the repository.
+topics/*.log
+data/
+
+# --- Dependencies & Testing Tools ---
+# Go-based benchmark artifacts
+vendor/
+go.sum
+tests/bench_bin*
+
+# --- Docker & Environment ---
+.env
+.docker_temp/
+# Local Docker data volumes
+docker-volumes/
+
+# --- Logs & Debugging Artifacts ---
+*.log
+*.out
+*.strace
+# Core dumps generated during segmentation faults (Memory safety audits)
+/core
+vgcore.*
+
+# --- Editor & OS Specific Files ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+# Assembly-specific backup or temporary files
+*.bak
+
+# --- Miscellaneous Build Artifacts ---
+# In case of manual out-of-tree compilations
+micro-pubsub
