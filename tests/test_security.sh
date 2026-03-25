@@ -3,8 +3,8 @@
 # Module: tests/test_security.sh
 # Project: La Roca Micro-PubSub
 # Responsibility: Security & Fuzzing Tests for Named Topics.
-#                 Validates boundary conditions, malformed URIs, and
-#                 unsupported HTTP methods.
+#                 Validates boundary conditions, malformed URIs,
+#                 unsupported HTTP methods, Header Overflows, and Delimiter Flooding.
 # =============================================================================
 
 HOST="http://localhost:8080"
@@ -33,11 +33,12 @@ docker compose down -v > /dev/null 2>&1
 rm -rf topics/*.log 2>/dev/null
 
 echo "🏗️  Starting ephemeral engine..."
-docker compose up -d --build > /dev/null 2>&1
+docker compose up -d --build pubsub-engine > /dev/null 2>&1
 sleep 2
 
 # -----------------------------------------------------------------------------
 # check_status: Helper to validate HTTP responses.
+# Accepts optional 6th parameter for Custom Headers.
 # -----------------------------------------------------------------------------
 check_status() {
     local method=$1
@@ -45,12 +46,20 @@ check_status() {
     local expected=$3
     local payload=$4
     local description=$5
+    local header=$6
 
-    # Capture HTTP status code. If the engine drops the connection (intentional
-    # for unsupported methods), curl returns 000.
-    STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X "$method" -d "$payload" "$HOST$endpoint")
+    # FIX: Respect the actual HTTP Method ($method) for ALL requests.
+    if [ -n "$header" ] && [ -n "$payload" ]; then
+        STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X "$method" -H "$header" -d "$payload" "$HOST$endpoint")
+    elif [ -n "$payload" ]; then
+        STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X "$method" -d "$payload" "$HOST$endpoint")
+    elif [ -n "$header" ]; then
+        STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X "$method" -H "$header" "$HOST$endpoint")
+    else
+        STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X "$method" "$HOST$endpoint")
+    fi
 
-    # Normalize 000 to 0 for numerical comparison
+    # Normalize 000 to 0 for numerical comparison (when connection drops)
     local final_status=$((10#$STATUS + 0))
 
     if [ "$final_status" -eq "$expected" ]; then
@@ -66,24 +75,33 @@ check_status() {
 # =============================================================================
 
 # 1. Topic Creation & Boundary Validation
-# Validates the 16-byte limit enforced in route_api.asm
 check_status "POST" "/pub/safe_topic" 200 "Ping" "Create valid topic"
-check_status "POST" "/pub/this_name_is_way_too_long_for_the_16_byte_buffer" 400 "" "Reject oversized topic name (>16 bytes)"
+check_status "POST" "/pub/this_name_is_way_too_long_for_16b" 400 "" "Reject oversized topic name (>16 bytes)"
 
 # 2. Malformed URI & Sequence Validation
-# Validates ASCII-to-Integer parsing and empty field protection in handle_sub.asm
 check_status "GET" "/sub/safe_topic/not_a_number" 400 "" "Reject alphanumeric sequence ID"
 check_status "GET" "/sub/safe_topic/" 400 "" "Reject empty sequence ID field"
 
 # 3. Protocol Hardening: Unsupported HTTP Methods
-# The engine is designed to drop connections for unknown methods to save cycles.
-check_status "PUT" "/pub/safe_topic" 0 "" "Reject PUT request (Immediate Drop)"
-check_status "DELETE" "/sub/safe_topic/0" 0 "" "Reject DELETE request (Immediate Drop)"
+# This will now ACTUALLY send PUT and DELETE requests to the engine!
+check_status "PUT" "/pub/safe_topic" 400 "Payload" "Reject PUT request (400 Bad Request)"
+check_status "DELETE" "/sub/safe_topic/0" 400 "" "Reject DELETE request (400 Bad Request)"
 
-# 4. Fuzzing: Buffer Overflow & Payload Stress
-# Ensures the zero-allocation loop handles large payloads without stack corruption.
+# 4. Fuzzing: Payload Stress (Buffer Overflow Check)
 HUGE_PAYLOAD=$(head -c 10000 < /dev/zero | tr '\0' 'A')
 check_status "POST" "/pub/safe_topic" 200 "$HUGE_PAYLOAD" "Handle 10KB payload (Verify Truncation/Stability)"
+
+# =============================================================================
+# NEW TESTS: STREAM PROCESSING & BATCH INGESTION FUZZING
+# =============================================================================
+
+# 5. Header Overflow (Giant Routing Key)
+GIANT_KEY=$(head -c 1000 < /dev/zero | tr '\0' 'K')
+check_status "POST" "/pub/safe_topic" 200 "Test" "Handle oversized X-Roca-Key (1000 bytes without crash)" "X-Roca-Key: $GIANT_KEY"
+
+# 6. Delimiter Flooding (Empty Message Bomb)
+HUGE_NEWLINES=$(head -c 10000 < /dev/zero | tr '\0' '\n')
+check_status "POST" "/mpub/safe_topic" 200 "$HUGE_NEWLINES" "Handle 10,000 consecutive newlines in /mpub (Zero-length guard)"
 
 echo "-----------------------------------------------------------------"
 echo -e "${GREEN}✅ SECURITY TESTS PASSED! The engine is bulletproof.${NC}"

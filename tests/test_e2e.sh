@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Functional End-to-End Tests for La Roca Micro-PubSub (Named Topics Edition)
+# Functional End-to-End Tests for La Roca Micro-PubSub (v1.3.0)
 # =============================================================================
 
 HOST="http://localhost:8080"
@@ -15,7 +15,7 @@ docker compose down -v > /dev/null 2>&1
 
 rm -rf topics/*.log 2>/dev/null
 
-echo "🏗️  Starting ephemeral engine (Named Topics Mode)..."
+echo "🏗️  Starting ephemeral engine (Named Topics & Stream Processing Mode)..."
 docker compose up -d --build pubsub-engine > /dev/null 2>&1
 sleep 2
 # --- END SETUP ---
@@ -63,7 +63,7 @@ check_payload() {
     local expected_payload=$2
     local description=$3
 
-    # Command substitution automatically trims the trailing newline, which is perfect
+    # Command substitution automatically trims the trailing newline
     RESPONSE=$(curl -s -X GET "$HOST$endpoint" | tr -d '\0')
 
     if [ "$RESPONSE" == "$expected_payload" ]; then
@@ -111,16 +111,53 @@ check_status "/pub/batch_test" "POST" 200 "Msg_1" "Publish Msg 1 for batching"
 check_status "/pub/batch_test" "POST" 200 "Msg_2" "Publish Msg 2 for batching"
 check_status "/pub/batch_test" "POST" 200 "Msg_3" "Publish Msg 3 for batching"
 
-# Generamos el payload multilinea esperado (bash ignora el salto de línea final, igual que $(curl))
 EXPECTED_BATCH=$(printf "Msg_1\nMsg_2\nMsg_3")
 check_payload "/batch/batch_test/0/10" "$EXPECTED_BATCH" "Consume 3 messages via Batch Endpoint (Limit 10)"
 
-# 10. Check System Metrics
+# =============================================================================
+# NEW TESTS: MULTI-PUBLISH & STREAM PROCESSING (X-Roca-Key)
+# =============================================================================
+
+# 10. MULTI-PUBLISH (Batch Ingestion via \n)
+MPUB_PAYLOAD=$(printf "Line_1\nLine_2\nLine_3")
+MPUB_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST -d "$MPUB_PAYLOAD" "$HOST/mpub/mpub_test")
+if [ "$MPUB_STATUS" -eq "200" ]; then
+    echo -e "${GREEN}[PASS]${NC} Multi-Publish 3 delimited messages to 'mpub_test'"
+else
+    echo -e "${RED}[FAIL]${NC} Multi-Publish ingestion failed (Got $MPUB_STATUS)"
+    fail_and_exit
+fi
+check_payload "/sub/mpub_test/1" "Line_2" "Verify 'mpub_test' sequence 1 (Ingested via mpub)"
+
+# 11. STREAM PROCESSING (Routing Key Storage & Extraction)
+# Publish a message with a custom Routing Key Header
+curl -s -o /dev/null -H "X-Roca-Key: sensor_99" -X POST -d "Temp: 45C" "$HOST/pub/telemetry"
+
+# Fetch the raw HTTP response (Headers + Body) using curl -i
+KEY_RES=$(curl -s -i "$HOST/sub/telemetry/0")
+
+# Check if the Header exists in the response
+if echo "$KEY_RES" | grep -q "X-Roca-Key: sensor_99"; then
+    echo -e "${GREEN}[PASS]${NC} Extracted X-Roca-Key from HTTP Response Header"
+else
+    echo -e "${RED}[FAIL]${NC} Missing X-Roca-Key in HTTP Response"
+    fail_and_exit
+fi
+
+# Check if the Payload is intact (Not corrupted by the Key extraction)
+if echo "$KEY_RES" | grep -q "Temp: 45C"; then
+    echo -e "${GREEN}[PASS]${NC} Payload strictly isolated from Routing Key"
+else
+    echo -e "${RED}[FAIL]${NC} Payload corrupted during Key extraction"
+    fail_and_exit
+fi
+
+# 12. Check System Metrics
 check_status "/stats" "GET" 200 "" "Stats endpoint returns 200 OK"
 
 echo "-----------------------------------------------------------------"
 echo -e "${GREEN}✅ ALL TESTS PASSED SUCCESSFULLY!${NC}"
-echo "Named Topics, Binary Search, and Batch Consumption are working perfectly."
+echo "Named Topics, Batching, and Stream Processing (X-Roca-Key) are rock solid."
 
 # --- START TEARDOWN ---
 docker compose down -v > /dev/null 2>&1

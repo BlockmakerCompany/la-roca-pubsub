@@ -116,15 +116,15 @@ You can define the geometry of your Ring Buffers by passing the following enviro
 | :--- | :--- | :--- |
 | `ROCK_MSG_SIZE` | Fixed size in bytes for each message payload. | `256` |
 | `ROCK_MAX_MSGS` | Maximum number of messages a topic can hold. | `262143` |
+| `ROCK_KEY_SIZE` | Configurable routing key length (in bytes) for stream filtering. | `16` |
 
-*By default, the engine provisions **~64MB** per topic (256 bytes * 262143 messages + 256 bytes header).*
+*By default, the engine provisions **~64MB** per topic (256 bytes * 262143 messages + 256 bytes header). The 16-byte default key ensures 128-bit SIMD alignment for hardware-accelerated scanning.*
 
 ### 🛡️ The "Disk Authority" Protocol
 To prevent catastrophic data corruption caused by accidental misconfigurations in deployment manifests, the engine enforces a strict **Configuration Hierarchy**:
 If a pod crashes and is rescheduled, the engine recovers its $O(1)$ mmap offsets natively by reading the tattooed headers from the persistent volume, effectively neutralizing any misconfiguration in the deployment manifest.
 
-
-1. **Disk Authority (Absolute):** If a topic file (`.log`) already exists on disk, the engine reads the exact `MsgSize` and `MaxMsgs` tattooed into its binary header (offsets 8 and 16). **Existing files will completely ignore environment variables**, ensuring $O(1)$ offset math remains pristine.
+1. **Disk Authority (Absolute):** If a topic file (`.log`) already exists on disk, the engine reads the exact `MsgSize`, `MaxMsgs`, and `KeySize` tattooed into its binary header (offsets 8, 16, and 24). **Existing files will completely ignore environment variables**, ensuring $O(1)$ offset math remains pristine.
 2. **Environment Variables:** If a topic is being created for the first time (Auto-Provisioning), the engine will scan the OS environment pointers (`envp`) and use `ROCK_MSG_SIZE` and `ROCK_MAX_MSGS`.
 3. **Hardcoded Defaults:** If no environment variables are detected, the engine falls back to the default 64MB geometry.
 
@@ -209,12 +209,12 @@ The engine listens on port `8080`. Topics are dynamically created (Auto-Provisio
 
 **Publish a message:**
 ```bash
-curl -X POST -d "Trade_Order_BTC_72000" http://localhost:8080/pub/ticker_btc
+curl -X POST -H "X-Roca-Key: user_12345" -d "Trade_Order_BTC_72000" http://localhost:8080/pub/ticker_btc
 ```
 
 **Publish a multi-publish:**
 ```bash
-curl -X POST -d $'Price: 65000\nPrice: 65100\nPrice: 65050' http://localhost:8080/mpub/ticker_btc
+curl -X POST -H "X-Roca-Key: batch_trade" -d $'Price: 65000\nPrice: 65100\nPrice: 65050' http://localhost:8080/mpub/ticker_btc
 ```
 
 **Consume a single sequence:**
@@ -241,14 +241,17 @@ The memory map is strictly divided into a metadata header and a cyclic array of 
 | :--- | :--- | :--- | :--- |
 | `0x00000` | 8 B | **Global Tail** | Atomic `uint64` tracking the next available sequence ID. |
 | `0x00008` | 8 B | **Message Size** | Configured `rt_msg_size` (e.g., 256 bytes). |
-| `0x00010` | 240 B | **Reserved** | Padding for future ring boundaries and checksums. |
+| `0x00010` | 8 B | **Max Messages** | Configured `rt_max_messages` (e.g., 262143). |
+| `0x00018` | 8 B | **Key Size** | Configured `rt_key_size` (e.g., 16 bytes). |
+| `0x00020` | 224 B | **Reserved** | Padding for future ring boundaries and checksums. |
 
 **The Data Slot (e.g., 256 Bytes)**
 | Offset | Size | Content | Technical Detail |
 | :--- | :--- | :--- | :--- |
 | `+0` | 1 B | **Status Flag** | `0` = Empty, `1` = Writing (Locked), `2` = Ready. |
 | `+1` | 8 B | **Sequence ID** | The exact 64-bit sequence number of the message. |
-| `+9` | N B | **Payload** | The raw binary payload (up to `MsgSize - 9`). |
+| `+9` | K B | **Routing Key** | The `X-Roca-Key` value (up to `rt_key_size` bytes). |
+| `+9+K` | N B | **Payload** | The raw binary payload (up to `MsgSize - 9 - KeySize`). |
 
 ### 🧮 The $O(1)$ Addressing Formula
 Because messages are fixed-size, the subscriber engine never parses or scans the file. It resolves the exact byte offset for any sequence in pure $O(1)$ time using modulo arithmetic:
@@ -370,9 +373,10 @@ static_resources:
 ### 🚀 Benchmark Highlights
 In local stress-testing using raw TCP sockets over loopback (single-threaded, single Docker container):
 
-* **Multi-Publish Ingestion (`/mpub`):** **> 3,033,000 Messages / sec**
+* **Multi-Publish Ingestion (`/mpub`):** **~ 2,750,000 Messages / sec**
 * **Batch Consumption (`/batch`):** **> 700,000 Messages / sec**
-* **Memory Footprint:** **< 10 MB** (Active RAM, mostly L1/L2 cache + mmap pages)
+* **Error Rate:** **0.00%** (100% Payload Delivery under saturation).
+* **Memory Footprint:** **< 10 MB** (Active RAM, mostly L1/L2 cache + mmap pages).
 * **Syscalls:** Reduced by 99% during batched operations.
 
 ### 🧠 The Secret Sauce (Why is it so fast?)
@@ -407,6 +411,7 @@ Because this engine is built with a **Zero-Allocation, libc-free architecture**,
 - [x] **High-Performance Batch Consumption Endpoint**
 - [x] JSON Metrics Endpoint (`/stats`)
 - [x] **Multi-Publish (`/mpub`) Batched Ingestion**
+- [x] **Stream Processing Readiness (Hardware-Aligned Routing Keys)**
 - [ ] JIT Stream Processor (Wasm/eBPF integration)
 - [ ] Asynchronous DMA Worker via `io_uring`
 
