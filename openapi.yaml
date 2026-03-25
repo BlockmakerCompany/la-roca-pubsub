@@ -4,14 +4,15 @@ info:
   description: >
     Zero-allocation, zero-copy, and lock-free Publish/Subscribe engine written in x86_64 Assembly.
     Provides ultra-low latency message brokering using memory-mapped files (mmap) and hardware-level atomic operations.
-    Features dynamic Named Topics with Auto-Provisioning, O(log N) Binary Search resolution, and Batch Consumption.
-  version: 1.2.0
+    Features dynamic Named Topics with Auto-Provisioning, O(log N) Binary Search resolution, Batch Consumption, 
+    and Hardware-Aligned Routing Keys for Stream Processing.
+  version: 1.3.0
   contact:
     name: Engineering Team
 
 servers:
   - url: http://localhost:8080
-    description: Local development server
+    description: Local bare-metal engine
 
 paths:
   /live:
@@ -50,7 +51,7 @@ paths:
       description: >
         Injects a payload into the specified topic's Lock-Free Ring Buffer.
         If the topic does not exist, the engine will safely Auto-Provision it on disk and memory in < 1ms.
-        The payload size must not exceed the configured `rt_msg_size` (minus metadata headers).
+        The payload size must not exceed the configured `rt_msg_size` (minus metadata headers and key size).
       operationId: publishMessage
       parameters:
         - name: topic_name
@@ -61,6 +62,15 @@ paths:
             type: string
             pattern: '^[a-zA-Z0-9_-]{1,16}$'
             example: "ticker_btc"
+        - name: X-Roca-Key
+          in: header
+          required: false
+          description: >
+            Optional routing key for Stream Processing. Stored at a fixed memory offset for O(1) hardware-accelerated filtering.
+            Max length is determined by the engine's `rt_key_size` configuration (default: 16 bytes).
+          schema:
+            type: string
+            example: "user_12345"
       requestBody:
         required: true
         description: The raw binary or text payload to be published.
@@ -80,6 +90,7 @@ paths:
           description: Bad Request (e.g., Topic name exceeds 16 bytes).
         '500':
           description: Internal Error or Buffer Full (Backpressure).
+
   /mpub/{topic_name}:
     post:
       summary: Publish Messages in Batch (Multi-Publish)
@@ -87,7 +98,7 @@ paths:
         Injects multiple payloads into the specified topic's Lock-Free Ring Buffer in a single network round-trip.
         Payloads must be delimited by a newline character (`\n`). The engine scans the payload at the hardware level 
         (Zero-Allocation) and commits each line as an individual, immutable message.
-        If the topic does not exist, it will be Auto-Provisioned.
+        If a routing key is provided, it will be applied to all messages in the batch.
       operationId: multiPublishMessage
       parameters:
         - name: topic_name
@@ -98,6 +109,13 @@ paths:
             type: string
             pattern: '^[a-zA-Z0-9_-]{1,16}$'
             example: "ticker_btc"
+        - name: X-Roca-Key
+          in: header
+          required: false
+          description: Optional routing key. Applied to every message in the batch for unified stream processing.
+          schema:
+            type: string
+            example: "batch_trade_group"
       requestBody:
         required: true
         description: A concatenated stream of messages separated by `\n`.
@@ -105,7 +123,7 @@ paths:
           text/plain:
             schema:
               type: string
-              example: "Precio: 65000\nPrecio: 65100\nPrecio: 65050"
+              example: "Price: 65000\nPrice: 65100\nPrice: 65050"
           application/octet-stream:
             schema:
               type: string
@@ -117,6 +135,7 @@ paths:
           description: Bad Request (e.g., Topic name exceeds 16 bytes).
         '500':
           description: Internal Error or Buffer Full (Backpressure) during batch insertion.
+
   /sub/{topic_name}/{sequence_id}:
     get:
       summary: Consume a Single Message
@@ -143,7 +162,13 @@ paths:
             example: 0
       responses:
         '200':
-          description: The requested message payload.
+          description: The requested message payload and its associated routing key (if any).
+          headers:
+            X-Roca-Key:
+              description: The routing key associated with this message, extracted dynamically from the Ring Buffer.
+              schema:
+                type: string
+                example: "user_12345"
           content:
             application/octet-stream:
               schema:

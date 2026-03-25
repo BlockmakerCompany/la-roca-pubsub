@@ -1,8 +1,8 @@
 ; -----------------------------------------------------------------------------
 ; Module: src/routers/handle_mpub.asm
 ; Project: La Roca Micro-PubSub
-; Responsibility: Parse HTTP POST, extract multiple \n delimited messages,
-;                 and execute batch publication into the Ring Buffer.
+; Responsibility: Parse HTTP POST, extract routing key, split \n delimited
+;                 messages, and execute batch publication into the Ring Buffer.
 ; -----------------------------------------------------------------------------
 %include "config.inc"
 
@@ -33,7 +33,11 @@ section .text
 handle_mpub:
     push rbp
     mov rbp, rsp
-    sub rsp, 16                 ; Local Stack Buffer: 16 bytes for Topic Name
+    ; Allocate 32 bytes on stack:
+    ; [rbp-16] : 16 bytes for Topic Name
+    ; [rbp-24] : 8 bytes for Key Pointer
+    ; [rbp-32] : 8 bytes for Key Size
+    sub rsp, 32
 
     push r12
     push r13
@@ -45,15 +49,19 @@ handle_mpub:
     mov r13, rsi                ; R13 = Request Buffer Pointer
     mov r14, rdx                ; R14 = Total Bytes Read
 
+    ; Default Key State (No Key)
+    xor rax, rax
+    mov qword [rbp - 24], rax   ; Key Ptr = 0
+    mov qword [rbp - 32], rax   ; Key Size = 0
+
     ; =========================================================================
     ; 1. EXTRACT & NULL-PAD TOPIC NAME
     ; =========================================================================
-    ; Offset 11 skips "POST /mpub/"
-    lea rsi, [r13 + 11]
+    lea rsi, [r13 + 11]         ; Skip "POST /mpub/"
     lea rdi, [rbp - 16]
 
     xor rax, rax
-    mov qword [rdi], rax        ; Zero-out the local name buffer
+    mov qword [rdi], rax        ; Zero-out local name buffer
     mov qword [rdi + 8], rax
 
     mov rcx, 16
@@ -74,13 +82,13 @@ handle_mpub:
     ; =========================================================================
 .lookup_topic:
     lea rdi, [rbp - 16]
-    call registry_find          ; Search for topic metadata
+    call registry_find
     test rax, rax
     jnz .found_it
 
     TRACE "Topic not found. Attempting auto-creation (MPUB)..."
     lea rdi, [rbp - 16]
-    call create_new_topic       ; Lazy-load topic if missing (Enforces Disk Authority)
+    call create_new_topic
     test rax, rax
     jz .send_400
 
@@ -88,11 +96,11 @@ handle_mpub:
     mov r15, rax                ; R15 = Topic Mmap Base Pointer
 
     ; =========================================================================
-    ; 3. LOCATE HTTP BODY (Double CRLF Search)
+    ; 3. LOCATE HTTP BODY & HEADERS
     ; =========================================================================
     mov rcx, r14
     mov rdi, r13
-    mov eax, 0x0A0D0A0D         ; Little-Endian representation of "\r\n\r\n"
+    mov eax, 0x0A0D0A0D         ; "\r\n\r\n"
 
 .search_body:
     cmp dword [rdi], eax
@@ -103,13 +111,67 @@ handle_mpub:
     jmp .send_400               ; Body delimiter not found
 
 .found_body:
-    add rdi, 4
+    add rdi, 4                  ; Skip delimiter
     mov rbx, rdi                ; RBX = Pointer to Body Start
 
     mov rdx, rdi
     sub rdx, r13
     mov rcx, r14
-    sub rcx, rdx                ; RCX = Body Length (Total - Header)
+    sub rcx, rdx                ; RCX = Total Body Length
+
+    ; =========================================================================
+    ; 3.5 EXTRACT ROUTING KEY (Scan Headers for X-Roca-Key:)
+    ; =========================================================================
+    push rcx                    ; Save Body Length across key search
+    push rbx                    ; Save Body Pointer across key search
+
+    mov rdi, r13                ; Start scanning from the beginning
+    mov r9, rbx
+    sub r9, r13                 ; R9 = Length of Headers
+    sub r9, 11                  ; Safe margin
+    jle .key_search_done
+
+.scan_key:
+    cmp dword [rdi], 0x6F522D58   ; "X-Ro"
+    jne .next_char
+    cmp dword [rdi+4], 0x4B2D6163 ; "ca-K"
+    jne .next_char
+    mov eax, dword [rdi+8]
+    and eax, 0x00FFFFFF
+    cmp eax, 0x003A7965           ; "ey:"
+    jne .next_char
+
+    ; Key Found!
+    lea rsi, [rdi + 11]
+    cmp byte [rsi], ' '
+    jne .find_key_end
+    inc rsi                       ; Skip space
+
+.find_key_end:
+    mov rdi, rsi
+.key_end_loop:
+    cmp byte [rdi], 0x0D
+    je .calc_key_len
+    cmp byte [rdi], 0x0A
+    je .calc_key_len
+    inc rdi
+    jmp .key_end_loop
+
+.calc_key_len:
+    mov qword [rbp - 24], rsi   ; Store Key Ptr in stack
+    mov rdx, rdi
+    sub rdx, rsi
+    mov qword [rbp - 32], rdx   ; Store Key Size in stack
+    jmp .key_search_done
+
+.next_char:
+    inc rdi
+    dec r9
+    jnz .scan_key
+
+.key_search_done:
+    pop rbx                     ; Restore Body Pointer
+    pop rcx                     ; Restore Body Length
 
     ; =========================================================================
     ; 4. THE HOT LOOP: BATCH INGESTION (\n delimiter)
@@ -138,7 +200,7 @@ handle_mpub:
     test r8, r8
     jz .skip_empty              ; Ignore empty lines (double newlines)
 
-    mov r9, r8                  ; R9 = Actual payload length to inject
+    mov r9, r8                  ; R9 = Actual payload length
     mov al, byte [rbx + r8 - 1]
     cmp al, 13                  ; Check for '\r' (CR) at end of line
     jne .do_publish
@@ -146,31 +208,31 @@ handle_mpub:
     jz .skip_empty
 
 .do_publish:
-    mov rdi, r15                ; RDI = Mmap Base Pointer
-    mov rsi, rbx                ; RSI = Payload Pointer (Body segment)
-    mov rdx, r9                 ; RDX = Payload Length (sanitized)
+    ; --- STATE PRESERVATION SHIELD (FIXED) ---
+    push r15                    ; Save Mmap Pointer
+    push rbx                    ; Save current payload pointer position
+    push rcx                    ; Save remaining body length
+    push r8                     ; Save line length (including newline)
 
-    ; --- STATE PRESERVATION SHIELD (System V ABI Compliance) ---
-    ; Preserve loop-sensitive registers on the stack.
-    ; 4 registers * 8 bytes = 32 bytes (keeps 16-byte stack alignment).
-    push r15
-    push rbx
-    push rcx
-    push r8
+    ; Setup 5-Parameter ABI for publish_message
+    mov rdi, r15                ; Mmap Base Pointer
+    mov rsi, [rbp - 24]         ; Key Pointer
+    mov rdx, [rbp - 32]         ; Key Size
+    mov rcx, rbx                ; Payload Pointer (Start of line)
+    mov r8,  r9                 ; Payload Size (Without CRLF)
 
-    call publish_message        ; Atomic injection into Ring Buffer
+    call publish_message
 
     pop r8
     pop rcx
     pop rbx
     pop r15
-    ; -----------------------------------------------------------
+    ; -----------------------------------------
 
     cmp rax, 0
-    jl .send_500                ; Critical error (e.g., Ring Buffer full)
+    jl .send_500                ; Critical error (Buffer Full / Bad Geometry)
 
 .skip_empty:
-    ; Advance pointers and decrement total body counter
     lea rbx, [rbx + r8 + 1]     ; Move RBX past the message and the '\n'
     sub rcx, r8
     dec rcx
@@ -188,9 +250,12 @@ handle_mpub:
     jz .send_200
 
 .do_publish_last:
+    ; No need to push/pop here as the loop is ending, but we must set ABI
     mov rdi, r15
-    mov rsi, rbx
-    mov rdx, r9
+    mov rsi, [rbp - 24]
+    mov rdx, [rbp - 32]
+    mov rcx, rbx
+    mov r8, r9
     call publish_message
     jmp .send_200
 
@@ -221,11 +286,11 @@ handle_mpub:
     syscall
 
 .exit:
+    add rsp, 32                 ; Clear local stack variables
     pop rbx
     pop r15
     pop r14
     pop r13
     pop r12
-    add rsp, 16                 ; Clear local topic name buffer
     pop rbp
     ret

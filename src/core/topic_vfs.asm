@@ -8,6 +8,7 @@
 
 extern rt_msg_size
 extern rt_max_messages
+extern rt_key_size              ; NEW: Global configuration for key size
 extern registry_insert
 
 section .data
@@ -141,16 +142,24 @@ create_new_topic:
     mov rbx, [rt_max_messages]
     mov qword [r15 + 16], rbx       ; Tattoo MaxMsgs
 
+    ; --- NEW: Tattoo Key Size ---
+    mov rbx, [rt_key_size]
+    mov qword [r15 + 24], rbx       ; Offset 24: KeySize
+
 .enforce_authority:
     ; =========================================================================
     ; 🛡️ DISK AUTHORITY ENFORCEMENT
     ; =========================================================================
     ; We synchronize RAM globals with the "Absolute Truth" from the disk header.
-    ; This prevents poisoned Environment Variables from corrupting O(1) math.
     mov rax, [r15 + 8]              ; Load true MsgSize from mmap
     mov [rt_msg_size], rax          ; Overwrite RAM global
+
     mov rax, [r15 + 16]             ; Load true MaxMsgs from mmap
     mov [rt_max_messages], rax      ; Overwrite RAM global
+
+    ; --- NEW: Enforce Key Size ---
+    mov rax, [r15 + 24]             ; Load true KeySize from mmap
+    mov [rt_key_size], rax          ; Overwrite RAM global
 
 .register:
     ; Close FD

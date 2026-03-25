@@ -19,6 +19,11 @@ section .data
                       db "Error: Topic name too long"
     res_400_len       equ $ - res_400_bad_topic
 
+    ; GENERIC 400 RESPONSE FOR UNSUPPORTED VERBS OR MALFORMED URIS
+    res_400_generic   db "HTTP/1.1 400 Bad Request", 13, 10
+                      db "Content-Length: 0", 13, 10, 13, 10
+    res_400_gen_len   equ $ - res_400_generic
+
 section .text
     global route_api
 
@@ -36,7 +41,7 @@ route_api:
     je .route_get
     cmp eax, 0x54534F50         ; 'POST' (Little Endian)
     je .route_post
-    jmp .not_handled
+    jmp .not_handled            ; If not GET/POST, reject politely
 
 .route_get:
     ; Load the first 8 bytes following 'GET ' for fast prefix masking
@@ -152,7 +157,6 @@ route_api:
 ; -----------------------------------------------------------------------------
 .send_400_error:
     mov rax, SYS_WRITE
-    ; --- FIX APLICADO AQUÍ ---
     lea rsi, [rel res_400_bad_topic]
     mov rdx, res_400_len
     syscall
@@ -178,8 +182,15 @@ route_api:
     jmp .handled
 
 .not_handled:
-    xor rax, rax
-    jmp .exit
+    ; --- ELEGANT HTTP 400 FALLBACK ---
+    ; Send HTTP 400 Bad Request for unsupported verbs or malformed URIs
+    ; instead of closing the socket abruptly. This ensures HTTP/1.1 compliance.
+    mov rax, SYS_WRITE
+    lea rsi, [rel res_400_generic]
+    mov rdx, res_400_gen_len
+    syscall                     ; Write "400 Bad Request" to the socket
+    jmp .handled                ; Finalize cleanly
+
 .handled:
     mov rax, 1
 .exit:
