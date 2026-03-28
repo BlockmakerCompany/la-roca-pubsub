@@ -412,6 +412,7 @@ Because this engine is built with a **Zero-Allocation, libc-free architecture**,
 - [x] JSON Metrics Endpoint (`/stats`)
 - [x] **Multi-Publish (`/mpub`) Batched Ingestion**
 - [x] **Stream Processing Readiness (Hardware-Aligned Routing Keys)**
+- [ ] **HTTP/1.1 Keep-Alive & Epoll Persistence** (Bypass TCP 3-way handshake & `sys_close` overhead)
 - [ ] JIT Stream Processor (Wasm/eBPF integration)
 - [ ] Asynchronous DMA Worker via `io_uring`
 
