@@ -10,6 +10,56 @@
 ; -----------------------------------------------------------------------------
 %include "config.inc"
 
+; -----------------------------------------------------------------------------
+; Optional AFL++ edge instrumentation (fuzzing only).
+;
+;   Default build (no -DAFL_INSTRUMENTED): AFL_EDGE expands to NOTHING, so the
+;   production binary is byte-identical to an uninstrumented build.
+;
+;   Fuzz build (nasm -DAFL_INSTRUMENTED): each AFL_EDGE marks a unique
+;   control-flow edge in the shared AFL map via __afl_trace (which implements
+;   the neverZero counter). This gives afl-fuzz REAL coverage of the hand-written
+;   assembly, with no QEMU mode (-Q) and no afl-qemu-trace dependency.
+; -----------------------------------------------------------------------------
+%ifdef AFL_INSTRUMENTED
+    extern __afl_trace
+
+; AFL_EDGE id — record a control-flow edge in the AFL coverage map.
+; Preserves every register (saves all caller-saved regs + rbx) and guarantees
+; a 16-byte aligned stack for the __afl_trace call regardless of the alignment
+; at the call site (works both in a prologue body and at a `call`-target entry).
+%macro AFL_EDGE 1
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push rbx
+    mov rbx, rsp
+    and rsp, -16
+    mov edi, %1
+    call __afl_trace
+    mov rsp, rbx
+    pop rbx
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+%endmacro
+%else
+%macro AFL_EDGE 1
+%endmacro
+%endif
+
 section .text
     global parse_http_request
 
@@ -21,6 +71,7 @@ section .text
 parse_http_request:
     push rbp
     mov rbp, rsp
+    AFL_EDGE 0x0001
 
     ; Identify HTTP Method (First 4 bytes)
     mov eax, dword [rdi]
@@ -31,6 +82,7 @@ parse_http_request:
     jmp .p_not_handled
 
 .p_get:
+    AFL_EDGE 0x0002
     ; Load the first 8 bytes following 'GET ' for fast prefix masking
     mov rax, qword [rdi + 4]
 
@@ -65,6 +117,7 @@ parse_http_request:
     jmp .p_sub
 
 .p_check_batch:
+    AFL_EDGE 0x0005
     ; Check for "/batch/" (Prefix: 7 bytes)
     mov r8, rax
     mov r9, 0x00FFFFFFFFFFFFFF  ; 56-bit mask
@@ -79,6 +132,7 @@ parse_http_request:
     jmp .p_batch
 
 .p_post:
+    AFL_EDGE 0x0003
     ; Load the first 8 bytes following 'POST '
     mov rax, qword [rdi + 5]
 
@@ -96,6 +150,7 @@ parse_http_request:
     jmp .p_pub
 
 .p_check_mpub:
+    AFL_EDGE 0x0006
     ; Check for "/mpub/" (Prefix: 6 bytes)
     mov r8, rax
     mov r9, 0x0000FFFFFFFFFFFF  ; 48-bit mask
@@ -111,27 +166,35 @@ parse_http_request:
 
 ; --- Route code returns ---
 .p_not_handled:
+    AFL_EDGE 0x0004
     mov rax, ROUTE_NOT_HANDLED
     jmp .p_exit
 .p_live:
+    AFL_EDGE 0x0007
     mov rax, ROUTE_LIVE
     jmp .p_exit
 .p_stats:
+    AFL_EDGE 0x0008
     mov rax, ROUTE_STATS
     jmp .p_exit
 .p_sub:
+    AFL_EDGE 0x0009
     mov rax, ROUTE_SUB
     jmp .p_exit
 .p_batch:
+    AFL_EDGE 0x000a
     mov rax, ROUTE_BATCH
     jmp .p_exit
 .p_pub:
+    AFL_EDGE 0x000b
     mov rax, ROUTE_PUB
     jmp .p_exit
 .p_mpub:
+    AFL_EDGE 0x000c
     mov rax, ROUTE_MPUB
     jmp .p_exit
 .p_bad_topic:
+    AFL_EDGE 0x000d
     mov rax, ROUTE_BAD_TOPIC
     jmp .p_exit
 
@@ -141,10 +204,12 @@ parse_http_request:
 ; Output: RAX = 1 (valid) / 0 (invalid)
 ; -----------------------------------------------------------------------------
 .p_validate_topic:
+    AFL_EDGE 0x000e
     push rdi
     add rdi, r8
     xor rcx, rcx
 .p_v_loop:
+    AFL_EDGE 0x000f
     mov al, [rdi + rcx]
     cmp al, '/'
     je .p_v_done
@@ -157,11 +222,13 @@ parse_http_request:
     jmp .p_v_loop
 
 .p_v_done:
+    AFL_EDGE 0x0010
     test rcx, rcx
     jz .p_v_fail
     mov rax, 1
     jmp .p_v_exit
 .p_v_fail:
+    AFL_EDGE 0x0011
     xor rax, rax
 .p_v_exit:
     pop rdi

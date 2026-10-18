@@ -5,6 +5,9 @@ El formato sigue Keep a Changelog y este proyecto usa versionado semántico.
 
 ## [Unreleased]
 
+### Added
+- instrumentar el parser assembly con edges AFL++ para cobertura real
+
 ### Docs
 - document afl-clang-fast and QEMU coverage limitation
 

@@ -9,11 +9,13 @@
 // server to restart the process for every mutated input, so a segfault in the
 // parser surfaces immediately as a crash.
 //
-// Build (via make):  make fuzz              (uses gcc by default)
-//                    make fuzz FUZZ_CC=afl-gcc
+// Build (via make):  make fuzz     -> plain harness (smoke test only)
+//                    make fuzz-afl -> parser assembly instrumented with AFL++
+//                                     edge calls + AFL++ runtime linked in
 //
-// Run with AFL++:    afl-fuzz -i tests/corpus -o tests/findings ./bin/fuzz_parser
-//   (add -Q for QEMU mode if you want the assembly itself instrumented)
+// Run with AFL++:    afl-fuzz -i tests/corpus -o tests/findings \
+//                       -- ./bin/fuzz_parser_afl
+//   (no -Q needed: the assembly is instrumented by hand, see docs/FUZZING.md)
 // -----------------------------------------------------------------------------
 #include <unistd.h>
 #include <string.h>
