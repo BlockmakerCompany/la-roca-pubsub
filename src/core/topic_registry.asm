@@ -11,8 +11,8 @@ section .bss
     global topic_count
 
     MAX_TOPICS      equ 1024
-    ENTRY_SIZE      equ 24      ; 16 bytes (Name) + 8 bytes (Mmap Pointer)
-    REGISTRY_SIZE   equ 24576   ; 1024 * 24 bytes (Fits perfectly in L1 Cache!)
+    ENTRY_SIZE      equ 32      ; 16 bytes (Name) + 8 bytes (Mmap Pointer) + 8 bytes (FD)
+    REGISTRY_SIZE   equ 32768   ; 1024 * 32 bytes (Fits perfectly in L1 Cache!)
 
     topic_registry  resb REGISTRY_SIZE
     topic_count     resq 1
@@ -34,6 +34,7 @@ registry_get_count:
 ; registry_insert: Inserts a new topic maintaining ASCENDING alphabetical order.
 ; Input:  RDI = Pointer to 16-byte null-padded topic name
 ;         RSI = 64-bit Mmap Pointer
+;         RDX = Topic File Descriptor (kept open for sys_sendfile)
 ; Output: RAX = 1 (Success), 0 (Registry Full or Topic Already Exists)
 ; -----------------------------------------------------------------------------
 registry_insert:
@@ -45,6 +46,7 @@ registry_insert:
 
     mov r12, rdi                ; R12 = New Topic Name Ptr
     mov r13, rsi                ; R13 = Mmap Ptr
+    mov r10, rdx                ; R10 = Topic FD
 
     mov r8, [topic_count]
     cmp r8, MAX_TOPICS
@@ -95,7 +97,7 @@ registry_insert:
     ; Calculate how many QWORDs (8-byte chunks) to move
     mov rcx, r8
     sub rcx, r9                 ; Number of entries to shift
-    imul rcx, 3                 ; Multiply by 3 (24 bytes per entry / 8 bytes)
+    imul rcx, 4                 ; Multiply by 4 (32 bytes per entry / 8 bytes)
 
     ; Perform backwards overlapping memory copy (memmove equivalent)
     std                         ; Set Direction Flag to decrement
@@ -119,6 +121,8 @@ registry_insert:
 
     ; Write the 8-byte Mmap Pointer directly after the name
     mov [rdi], r13
+    ; Write the 8-byte File Descriptor after the mmap pointer
+    mov [rdi + 8], r10
 
     inc qword [topic_count]     ; Atomically increment the total count
     mov rax, 1                  ; Return 1 (Success)

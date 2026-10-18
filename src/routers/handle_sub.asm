@@ -8,7 +8,7 @@
 
 extern registry_find
 extern create_new_topic
-extern consume_message
+extern locate_message
 extern rt_key_size
 
 section .data
@@ -39,6 +39,7 @@ section .bss
     sub_payload_buf resb 8192       ; Internal buffer for payload
     sub_key_buf     resb 256        ; Internal buffer for routing key
     http_out_buf    resb 16384      ; Increased buffer for HTTP response
+    sendfile_offset resq 1          ; off_t for sys_sendfile zero-copy path
 
 section .text
     global handle_sub
@@ -107,6 +108,7 @@ handle_sub:
 
 .found_it:
     mov r14, rax                ; r14 = Topic Mmap Base Pointer
+    mov rbx, rdx                ; rbx = Topic File Descriptor (for sendfile)
 
     ; =========================================================================
     ; 3. EXTRACT SEQUENCE NUMBER
@@ -142,23 +144,36 @@ handle_sub:
     xor rax, rax
     rep stosq
 
-    ; Setup ABI parameters
+    ; Locate the message slot (zero-copy: no payload copied to user space)
     mov rdi, r14                ; Mmap Base Pointer
     mov rsi, r15                ; Requested Sequence ID
-    lea rdx, [sub_payload_buf]  ; Payload Buffer
-    mov rcx, 8192               ; Payload Capacity
-    lea r8, [sub_key_buf]       ; Key Buffer (NEW)
-    call consume_message
+    call locate_message
 
-    cmp rax, 0
-    jl .send_500
-    je .send_404
+    test rax, rax
+    jz .send_404                ; Not ready / not found
 
-    mov r15, rax                ; r15 = Actual bytes read (Payload Length)
+    mov [sendfile_offset], rax  ; off_t payload offset in the topic file
+    mov r15, rdx                ; r15 = payload length
 
     ; =========================================================================
-    ; 5. BUILD DYNAMIC HTTP RESPONSE
+    ; 5. EXTRACT ROUTING KEY DIRECTLY FROM MMAP (slot + 9)
     ; =========================================================================
+    cmp qword [rt_key_size], 0
+    jle .build_headers          ; No key configured
+
+    mov rcx, [sendfile_offset]  ; payload offset
+    sub rcx, 9
+    sub rcx, [rt_key_size]      ; rcx = slot offset
+    lea rsi, [r14 + rcx + 9]    ; key source = slot + Status(1) + Seq(8)
+    lea rdi, [sub_key_buf]
+    mov rcx, [rt_key_size]
+    cld
+    rep movsb
+
+    ; =========================================================================
+    ; 6. BUILD HTTP HEADERS (payload is sent separately via sendfile)
+    ; =========================================================================
+.build_headers:
     lea rdi, [http_out_buf]     ; Dest for HTTP Packet
 
     ; Copy Response Header Start
@@ -224,20 +239,24 @@ handle_sub:
     mov dword [rdi], 0x0A0D0A0D
     add rdi, 4
 
-    ; Copy the extracted Payload
-    lea rsi, [sub_payload_buf]
-    mov rcx, r15
-    rep movsb
-
     ; =========================================================================
-    ; 6. TRANSMISSION & CLEANUP
+    ; 7. TRANSMISSION: headers via sys_write, payload via zero-copy sys_sendfile
     ; =========================================================================
+    ; Send headers
     mov rdx, rdi
     lea rsi, [http_out_buf]
-    sub rdx, rsi                ; Total HTTP packet size
+    sub rdx, rsi                ; header bytes count
 
     mov rax, SYS_WRITE
     mov rdi, r12
+    syscall
+
+    ; Zero-copy payload: sendfile(out_fd, in_fd, &offset, count)
+    mov rax, SYS_SENDFILE
+    mov rdi, r12                 ; out_fd = client socket
+    mov rsi, rbx                 ; in_fd  = topic file descriptor
+    lea rdx, [sendfile_offset]   ; pointer to off_t offset
+    mov r10, r15                 ; count = payload length
     syscall
     jmp .exit
 

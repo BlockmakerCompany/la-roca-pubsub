@@ -66,6 +66,9 @@ build_path_from_name:
 
 ; -----------------------------------------------------------------------------
 ; create_new_topic: Maps a topic file and enforces Disk Authority.
+; Input:  RDI = Pointer to 16-byte null-padded topic name
+; Output: RAX = Mmap Base Pointer (0 on failure)
+;         RDX = Topic File Descriptor (0 on failure, kept open for sys_sendfile)
 ; -----------------------------------------------------------------------------
 create_new_topic:
     push rbp
@@ -162,21 +165,20 @@ create_new_topic:
     mov [rt_key_size], rax          ; Overwrite RAM global
 
 .register:
-    ; Close FD
-    mov rax, SYS_CLOSE
-    mov rdi, r13
-    syscall
-
-    ; Register in engine
+    ; Keep the FD open for zero-copy sys_sendfile delivery.
+    ; Register in engine (name, mmap base, fd)
     mov rdi, r12
     mov rsi, r15
+    mov rdx, r13
     call registry_insert
 
-    mov rax, r15                    ; Success
+    mov rax, r15                    ; RAX = Mmap Base (Success)
+    mov rdx, r13                    ; RDX = Topic FD
     jmp .exit
 
 .fail:
     xor rax, rax
+    xor rdx, rdx
 .exit:
     pop r15
     pop r14
