@@ -39,7 +39,7 @@ docker rm -f asm_pubsub_config_run > /dev/null 2>&1
 rm -rf "$TEST_DIR"
 mkdir -p "$TEST_DIR"
 
-# --- FUNCIÓN FORENSE: Muestra logs antes de morir ---
+# --- FORENSIC HELPER: Dump logs before dying ---
 fail_with_logs() {
     echo -e "${RED}[FAIL] $1${NC}"
     echo -e "${YELLOW}=== 🕵️‍♂️ ENGINE FORENSICS (Last 20 lines) ===${NC}"

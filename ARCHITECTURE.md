@@ -1,6 +1,6 @@
 # Architecture of La Roca Micro-PubSub: The Zero-Abstraction Broker
 
-La Roca Micro-PubSub is an exercise in uncompromising efficiency and mechanical sympathy. In an ecosystem dominated by heavy JVM message brokers, Garbage Collection pauses, and bloated distributed consensus protocols, this document explores the low-level mechanics—from `lock xadd` atomics to $O(1)$ memory mapping—that allow a sub-10KB x86_64 Assembly engine to route, batch, and stream over **2,750,000 Messages Per Second** with zero dynamic allocations.
+La Roca Micro-PubSub is an exercise in uncompromising efficiency and mechanical sympathy. In an ecosystem dominated by heavy JVM message brokers, Garbage Collection pauses, and bloated distributed consensus protocols, this document explores the low-level mechanics—from `lock xadd` atomics to $O(1)$ memory mapping—that allow a ~14KB (stripped) x86_64 Assembly engine to route, batch, and stream over **2,750,000 Messages Per Second** with zero dynamic allocations.
 
 ---
 
@@ -95,10 +95,12 @@ Parsing HTTP headers string-by-string is slow. La Roca's router (`route_api.asm`
 * Instead of comparing strings, it loads the first 4 bytes of the socket buffer into the `EAX` register and compares them as a raw hexadecimal integer: `cmp eax, 0x20544547` (which translates perfectly to `"GET "`).
 * Illegal verbs (e.g., `DELETE`, `PUT`) instantly trigger an elegant HTTP `400 Bad Request` fallback, dropping the payload while preserving HTTP/1.1 keep-alive compliance without allocating error objects.
 
+In v1.4.0, the pure parsing logic was extracted into `parse_http_request.asm` (no syscalls, no handlers, no side effects) so it can be fuzzed independently of the engine. Delivery on `/sub` also switched from `sys_write` to zero-copy `sys_sendfile`: the topic FD is now kept open in the registry, and `locate_message` returns the payload's file offset + length without copying it into user space.
+
 ### 3.2 The Hot Loop (Batching & MPUB)
 
 To bypass the physical limits of the TCP loopback interface, La Roca introduces batched endpoints (`/mpub` and `/batch`).
-When ingesting a multi-publish payload separated by `\n`, the engine establishes an Assembly "Hot Loop". It scans the raw socket buffer byte-by-byte in register memory, surgically calculating payload lengths, and pushing them sequentially into the Ring Buffer while preserving loop counters in the hardware stack (`push rcx`, `push r8`). This reduces network syscalls by 99%.
+When ingesting a multi-publish payload separated by `\n`, the engine establishes an Assembly "Hot Loop". On AVX2-capable CPUs it scans the raw socket buffer with a SIMD path — broadcasting the delimiter with `vpbroadcastb`, comparing 32 bytes at once with `vpcmpeqb`, and extracting the match offset with `vpmovmskb` + `tzcnt`; on CPUs without AVX2 it falls back to a scalar byte-by-byte scan. The path is chosen at boot by `src/core/cpu_features.asm` (`cpuid`/`xgetbv`). This reduces network syscalls by 99%.
 
 ```mermaid
 graph LR
@@ -128,12 +130,15 @@ To eliminate the "algorithmic drift" common in LLM-generated code, we enforced r
 
 This was solved through strict **Tactical Stack Shielding**, re-pinning base pointers to non-volatile registers (`r12`) and manually auditing every `push`/`pop` balance to ensure the execution state survived nested subroutine jumps.
 
+A second ABI bug surfaced under concurrency stress: in the `/mpub` epilogue, the stack-pointer fix-up (`add rsp, 32`) was emitted *before* the `pop` sequence, so the callee-saved registers (`r12`–`r15`, `rbx`) were restored from the wrong offsets. The engine hung — the event loop stayed alive but stopped answering. The fix moved the `add rsp, 32` *after* the pops, matching the convention of every other handler. The canonical pins for each register across `syscall`/`call` boundaries are documented in `docs/REGISTER_TOPOLOGY.md`.
+
 ### 4.2 Security Hardening & Fuzzing
 
 In the absence of a high-level compiler’s safety nets, we relied on a brutal **Test-Driven Assembly** workflow to catch memory violations before they reached the disk.
 
 * **Header Overflows:** Giant routing keys (e.g., 1000 bytes) are instantly intercepted and safely truncated to `ROCK_KEY_SIZE` via the `cmovg` instruction, preventing buffer overflows into adjacent slots.
 * **Delimiter Flooding:** The `/mpub` endpoint is shielded against "Empty Message Bombs" (consecutive `\n` flooding) via hardware-level zero-length guards (`test r8, r8 / jz .skip`), ensuring the Ring Buffer sequences are never wasted by malicious or malformed payloads.
+* **Parser Fuzzing (v1.4.0):** `parse_http_request` is extracted as a pure, side-effect-free parser and fuzzed via an AFL++ harness (`make fuzz`), with a local no-crash smoke test (`tests/test_fuzz_smoke.sh`) for CI.
 
 ---
 
@@ -143,7 +148,7 @@ La Roca is designed to be the circulatory system of a high-performance microserv
 
 * **⚡ JIT Stream Processor:** Integrating eBPF/Wasm runtimes directly into the mmap consumer path for on-the-fly payload transformations.
 * **📡 io_uring Migration:** Transitioning from standard synchronous syscalls (`epoll`) to Linux `io_uring` for true asynchronous, zero-copy I/O.
-* **🌍 Aarch64 Porting:** Bringing La Roca’s sub-10KB efficiency to ARM64 architectures, targeting high-density AWS Graviton instances.
+* **🌍 Aarch64 Porting:** Bringing La Roca’s ~14KB (stripped) efficiency to ARM64 architectures, targeting high-density AWS Graviton instances.
 
 ---
 
@@ -153,7 +158,7 @@ La Roca is designed to be the circulatory system of a high-performance microserv
 
 * **Design & Architecture:** Fernando Ezequiel Mancuso
 * **Organization:** [BlockmakerCompany](https://github.com/BlockmakerCompany)
-* **Release:** March 2026 | v1.3.0
+* **Release:** March 2026 | v1.4.0
 * **Inquiries:** For industrial integration or low-level consulting, reach out via [GitHub Issues](https://github.com/BlockmakerCompany/la-roca-pubsub/issues).
 
 > *"The best way to understand how a computer works is to stop asking the operating system for permission and start giving it orders."*

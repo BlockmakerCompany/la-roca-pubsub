@@ -3,7 +3,7 @@
 
 [![Docker Hub](https://img.shields.io/badge/Docker%20Hub-20KB-blue?logo=docker&logoColor=white)](https://hub.docker.com/r/blockmaker/la-roca-pubsub)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Binary Size](https://img.shields.io/badge/Binary%20Size-10KB-blue)
+![Binary Size](https://img.shields.io/badge/Binary%20Size-~14KB%20stripped-blue)
 ![Language](https://img.shields.io/badge/Language-Assembly%20x86__64-red)
 ![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey)
 ![Company](https://img.shields.io/badge/Backed%20By-BlockMaker%20S.R.L.-black)
@@ -51,6 +51,7 @@ Modern message brokers (Kafka, RabbitMQ, Pulsar) are incredible tools, but they 
 * **Hot-Loop Batching:** A dedicated high-throughput endpoint for consuming multiple messages in a single network round-trip, minimizing syscall overhead.
 * **Disk Authority & Auto-Provisioning:** Topics are safely auto-created on the fly. Ring buffer geometries and sequences are persisted in the file headers, surviving container restarts natively.
 * **Bare-Metal HTTP 1.1:** Custom, zero-allocation HTTP parser that routes requests by directly comparing 64-bit registers.
+* **Hardware Feature Detection:** At boot the engine probes the CPU with `cpuid`/`xgetbv` (`src/core/cpu_features.asm`) and selects the SIMD (AVX2) or scalar hot loop accordingly.
 
 ---
 
@@ -64,14 +65,17 @@ Modern message brokers (Kafka, RabbitMQ, Pulsar) are incredible tools, but they 
 │   │   ├── globals.asm         # Single Source of Truth for engine state & config
 │   │   ├── utils.asm           # Low-level string utilities and env parsing (atoi, get_env)
 │   │   ├── config_loader.asm   # Dynamic geometry & Environment variable orchestrator
+│   │   ├── cpu_features.asm    # CPUID/XGETBV AVX2 probe (SIMD vs scalar path)
 │   │   ├── topic_vfs.asm       # Filesystem, mmap, Auto-Provisioning & Disk Authority
+│   │   ├── topic_manager.asm   # Topic lifecycle & startup scanning (Disk Authority)
 │   │   ├── topic_registry.asm  # O(N) array shifting for sorted insertions
 │   │   ├── search_engine.asm   # O(log N) Binary Search for topic names
 │   │   ├── publisher.asm       # Lock-free writing and sfence barriers
 │   │   ├── subscriber.asm      # O(1) offset calculation and wait-free reading
-│   │   └── dma_worker.asm      # io_uring asynchronous memory flushing
+│   │   └── dma_worker.asm      # io_uring SQE preparation (staged; not wired yet)
 │   ├── routers/                # HTTP parsing and routing
-│   │   ├── route_api.asm       # Register-based HTTP GET/POST routing
+│   │   ├── route_api.asm       # Network-facing dispatcher (socket + handlers)
+│   │   ├── parse_http_request.asm  # Pure L7 parser (AFL++ fuzz target, no side effects)
 │   │   ├── handle_batch.asm    # High-throughput sequential message collector
 │   │   ├── handle_mpub.asm     # High-performance Multi-Publish batch ingestion
 │   │   └── handle_*.asm        # Specific endpoint handlers (Stats, Live, Pub, Sub)
@@ -80,10 +84,17 @@ Modern message brokers (Kafka, RabbitMQ, Pulsar) are incredible tools, but they 
 │   ├── test_e2e.sh                  # Deterministic E2E Bash test suite
 │   ├── test_security.sh             # Fuzzing and Buffer Overflow protections
 │   ├── test_config_persistence.sh   # Env poisoning and Disk Authority audits
-│   └── bench.go                     # High-Frequency TCP concurrency benchmark
-├── run_all_tests.sh            # Master pipeline orchestrator (Functional, Security, Stress)
+│   ├── test_stability.sh            # Post-stress healthcheck (concurrent hammer)
+│   ├── bench.go                     # High-Frequency TCP concurrency benchmark
+│   ├── afl_harness.c                # AFL++ harness for the pure L7 parser
+│   ├── test_fuzz_smoke.sh           # No-crash smoke test for the fuzz harness
+│   ├── corpus/                      # AFL++ seed inputs (valid + malformed)
+│   └── run_all_tests.sh             # Master pipeline orchestrator
+├── docs/
+│   ├── REGISTER_TOPOLOGY.md    # Canonical register pins across syscall/call boundaries
+│   └── INTERNAL_ROADMAP.md     # Internal engineering roadmap
 ├── Makefile                    # Toolchain configuration (NASM + LD)
-├── docker-compose.yml          # Ecosystem simulation (Cluster/Node)
+├── docker-compose.yaml         # Ecosystem simulation (Cluster/Node)
 └── openapi.yaml                # OpenAPI 3.0 specification
 ```
 
@@ -155,8 +166,8 @@ The project includes a multi-layered automated testing infrastructure designed t
 ### 🚀 Master Orchestrator (CI/CD Ready)
 You can run the entire validation pipeline sequentially, culminating in the high-frequency Go stress test, using the master script:
 ```bash
-# Run Functional, Security, Persistence, and Stress tests
-./run_all_tests.sh --stress
+# Run Config, E2E, Security, Stability, and (optionally) long Stress tests
+./tests/run_all_tests.sh --stress
 ```
 
 ### 1. Functional Integration (E2E)
@@ -181,12 +192,36 @@ Ensures that once a topic is provisioned, its ring-buffer geometry is tattooed t
 ./tests/test_config_persistence.sh
 ```
 
-### 4. High-Frequency Stress Test (mpub)
+### 4. Post-Stress Stability (Concurrent Hammer)
+Verifies the engine survives being hammered by 100 concurrent TCP connections and remains responsive afterwards (`/live` and `/stats` still return 200). This catches register-corruption hangs that leave the event loop alive but unresponsive.
+```bash
+./tests/test_stability.sh
+```
+
+### 5. High-Frequency Stress Test (mpub)
 To measure the raw power of the **Zero-Copy / No-LibC** architecture, we use direct Linux Kernel syscalls through a custom Go benchmark.
 ```bash
-# Target: > 3,000,000 Messages / sec
-go run tests/bench.go mpub
+# Fails (exit 1) if any request errors; --verify adds a post-stress healthcheck
+go run tests/bench.go mpub --verify
 ```
+
+### 6. Parser Fuzzing (AFL++)
+The L7 router is extracted into a pure, side-effect-free parser (`parse_http_request`) so it can be fuzzed for memory safety without touching the network or the engine.
+```bash
+# Smoke test (plain harness, no crash check)
+make fuzz
+./tests/test_fuzz_smoke.sh
+
+# REAL guided fuzzing: the parser assembly is hand-instrumented with AFL++
+# edge calls (see docs/FUZZING.md). No QEMU mode needed.
+make fuzz-afl
+afl-fuzz -i tests/corpus -o tests/findings -V 300 -- ./bin/fuzz_parser_afl
+```
+
+> **Coverage note:** `make fuzz-afl` marks each basic block of the hand-written
+> assembly with an `AFL_EDGE` call to `__afl_trace` (neverZero counters). This
+> gives `afl-fuzz` real edge coverage over the router **without** QEMU mode
+> (`-Q`) or `afl-qemu-trace`. Full methodology and results: `docs/FUZZING.md`.
 
 > **Note:** Because the engine bypasses `libc` and uses a zero-allocation event loop, you will likely saturate your local network loopback interface before maxing out the CPU.
 
@@ -384,8 +419,10 @@ In local stress-testing using raw TCP sockets over loopback (single-threaded, si
 1. **Zero-Allocation HTTP Routing:** The server never calls `malloc` or relies on a heap. It parses HTTP requests strictly using pointer arithmetic and register offsets. Strings are evaluated in-place.
 2. **Lock-Free Concurrency:** Instead of using slow OS-level mutexes or semaphores, the Ring Buffer index is advanced using the `lock xadd` hardware instruction. This guarantees atomic, thread-safe message ordering at the CPU level without blocking.
 3. **O(1) Memory-Mapped I/O (`mmap`):** Topics are fixed-size framing files mapped directly into RAM. Reads and writes are straight memory pointer dereferences (`Base_Address + (Sequence * Frame_Size)`). The Linux Kernel handles page flushing asynchronously.
-4. **Hardware-Accelerated Scanning:** Batched endpoints (`/mpub`) use the `repne scasb` instruction to scan for `\n` delimiters at cache-speed, allowing the CPU's branch predictor to maintain a continuous hot-loop.
+4. **Hardware-Accelerated Scanning:** Batched endpoints (`/mpub`) scan for `\n` delimiters with a SIMD hot loop. On AVX2-capable CPUs the delimiter is broadcast with `vpbroadcastb`, 32 bytes are compared in parallel with `vpcmpeqb`, and the match offset is extracted with `vpmovmskb` + `tzcnt`; on CPUs without AVX2 the loop falls back to a scalar byte-by-byte scan. The path is chosen at boot via CPU feature detection (`cpuid`/`xgetbv`).
 5. **L1 Cache Optimization:** The Topic Registry is stored in a contiguous, alphabetically sorted array of 24-byte entries. Lookups fit perfectly inside the CPU's L1 cache, making topic resolution virtually instantaneous.
+
+> **Register Topology:** The canonical map of which registers hold what — and what each instruction boundary may clobber — lives in [`docs/REGISTER_TOPOLOGY.md`](docs/REGISTER_TOPOLOGY.md). Any `.asm` module that violates these pins corrupts the hot loop.
 
 ---
 
@@ -412,6 +449,7 @@ Because this engine is built with a **Zero-Allocation, libc-free architecture**,
 - [x] JSON Metrics Endpoint (`/stats`)
 - [x] **Multi-Publish (`/mpub`) Batched Ingestion**
 - [x] **Stream Processing Readiness (Hardware-Aligned Routing Keys)**
+- [x] **Zero-Copy `sys_sendfile` Delivery** (`/sub` bypasses user-space payload copy)
 - [ ] **HTTP/1.1 Keep-Alive & Epoll Persistence** (Bypass TCP 3-way handshake & `sys_close` overhead)
 - [ ] JIT Stream Processor (Wasm/eBPF integration)
 - [ ] Asynchronous DMA Worker via `io_uring`

@@ -11,6 +11,7 @@ extern rt_key_size              ; NEW: Global configuration for key size
 
 section .text
     global consume_message
+    global locate_message
 
 ; -----------------------------------------------------------------------------
 ; consume_message: Reads a message and its routing key from the Ring Buffer.
@@ -101,9 +102,11 @@ consume_message:
     ; Calculate maximum copy size: MsgSize - 9 - KeySize
     mov rcx, r15            ; RCX = Dest Capacity
     mov rax, [rt_msg_size]
-    sub rax, 9              ; Subtract Status and Seq
-    sub rax, [rt_key_size]  ; Subtract Key Size
-    js .not_ready           ; Guard: If math is negative, geometry is broken
+    mov rdx, 9
+    add rdx, [rt_key_size]  ; RDX = 9 + key_size
+    cmp rax, rdx
+    jbe .not_ready          ; msg_size <= 9 + key_size -> no payload
+    sub rax, rdx            ; RAX = payload length (> 0)
 
     cmp rcx, rax
     cmovg rcx, rax          ; Truncate if user buffer is smaller than payload
@@ -125,6 +128,85 @@ consume_message:
     pop rbx             ; Restore preserved RBX
     pop r15
     pop r14
+    pop r13
+    pop r12
+    pop rbp
+    ret
+
+; -----------------------------------------------------------------------------
+; locate_message: Validates a message slot WITHOUT copying it. Used by the
+; zero-copy sys_sendfile delivery path.
+; Input:  RDI = Mmap Base Pointer
+;         RSI = Expected Sequence
+; Output: RAX = Absolute file offset of the payload (0 if not ready)
+;         RDX = Payload length in bytes (msg_size - 9 - key_size)
+; -----------------------------------------------------------------------------
+locate_message:
+    push rbp
+    mov rbp, rsp
+    push r12
+    push r13
+    push rbx
+
+    mov r12, rdi        ; R12 = Mmap Base
+    mov r13, rsi        ; R13 = Expected Sequence
+
+    ; 1. Tail check (Global Sequence Counter)
+    mov rax, qword [r12]
+    cmp r13, rax
+    jge .not_ready
+
+    ; 2. O(1) Offset Calculation
+    ; Offset = 256 + ((Seq % Max) * MsgSize)
+    mov rax, r13
+    xor rdx, rdx
+    mov rcx, [rt_max_messages]
+    div rcx             ; RDX = Seq % Max
+
+    mov rax, rdx
+    mov rcx, [rt_msg_size]
+    mul rcx             ; RAX = (Seq % Max) * MsgSize
+    add rax, 256        ; RAX = slot offset in file
+
+    lea rbx, [r12 + rax]    ; RBX = absolute slot address
+
+    ; 3. Status Validation
+    mov cl, byte [rbx]
+    cmp cl, 2           ; 2 = READY
+    jne .not_ready
+    lfence
+
+    ; 4. Sequence Validation (Wrap-around guard)
+    mov rcx, qword [rbx + 1]
+    cmp rcx, r13
+    jne .not_ready
+
+    ; Double-check: the publisher could have recycled the slot between the two
+    ; reads above. Re-validate status to close the TOCTOU window.
+    cmp byte [rbx], 2
+    jne .not_ready
+
+    ; 5. Payload offset (skip Status + Seq + Key) and length
+    add rax, 9
+    add rax, [rt_key_size]      ; RAX = payload offset in file
+
+    ; Geometry guard: payload length must be strictly positive. Use unsigned
+    ; arithmetic so a zero-length payload or a 64-bit underflow (msg_size <
+    ; 9 + key_size) is rejected instead of silently served.
+    mov rdx, [rt_msg_size]
+    mov rcx, 9
+    add rcx, [rt_key_size]      ; RCX = 9 + key_size
+    cmp rdx, rcx
+    jbe .not_ready              ; msg_size <= 9 + key_size -> no payload
+    sub rdx, rcx                ; RDX = payload length (> 0)
+    jmp .exit
+
+.not_ready:
+    xor rax, rax
+    xor rdx, rdx
+
+.exit:
+    pop rbx
     pop r13
     pop r12
     pop rbp

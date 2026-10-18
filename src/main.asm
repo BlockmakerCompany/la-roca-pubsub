@@ -11,6 +11,7 @@ extern init_topics
 extern route_api
 extern boot_time            ; Defined in globals.asm (Uptime tracking)
 extern load_engine_config   ; Parses envp for dynamic geometry
+extern detect_cpu_features  ; CPUID-based AVX2 capability probe
 
 section .data
     msg_boot        db "La Roca Micro-PubSub starting on port 8080...", 10, 0
@@ -44,9 +45,7 @@ _start:
     ; =========================================================================
     ; 0. CAPTURE ENGINE GENESIS (Boot Timestamp)
     ; =========================================================================
-    mov rax, 201                ; sys_time (Returns Unix Epoch in RAX)
-    xor rdi, rdi                ; rdi = NULL
-    syscall
+    SYSCALL SYS_TIME, 0         ; sys_time(NULL) -> Unix Epoch in RAX
     mov [boot_time], rax        ; Hydrate global boot_time for uptime metrics
 
     ; =========================================================================
@@ -62,14 +61,12 @@ _start:
     lea rsi, [rsp + 8 + rdi*8 + 8] ; RSI = Pointer to the envp array
     call load_engine_config        ; Parse envp and overwrite defaults in globals.asm
 
+    call detect_cpu_features       ; Probe AVX2 so hot loops pick SIMD vs scalar
+
     ; =========================================================================
     ; 1. CONSOLE INITIALIZATION
     ; =========================================================================
-    mov rax, 1                  ; sys_write
-    mov rdi, 1                  ; STDOUT
-    lea rsi, [msg_boot]
-    mov rdx, msg_boot_l
-    syscall
+    DO_SYS_WRITE 1, msg_boot, msg_boot_l
 
     ; =========================================================================
     ; 2. STORAGE & ENGINE HYDRATION
@@ -82,11 +79,7 @@ _start:
     ; 3. NETWORK STACK INITIALIZATION (TCP)
     ; =========================================================================
     ; Create Socket: AF_INET (2), SOCK_STREAM (1), IPPROTO_TCP (6)
-    mov rax, 41                 ; sys_socket
-    mov rdi, 2
-    mov rsi, 1
-    mov rdx, 6
-    syscall
+    SYSCALL SYS_SOCKET, 2, 1, 6
     cmp rax, 0
     jl .fatal_error
     mov [server_fd], rax
@@ -103,26 +96,17 @@ _start:
     pop rcx                     ; Restore stack
 
     ; Bind Socket to 0.0.0.0:8080
-    mov rax, 49                 ; sys_bind
-    mov rdi, [server_fd]
-    lea rsi, [sockaddr]
-    mov rdx, 16
-    syscall
+    SYSCALL SYS_BIND, [server_fd], sockaddr, 16
     cmp rax, 0
     jl .fatal_error
 
     ; Start Listening
-    mov rax, 50                 ; sys_listen
-    mov rdi, [server_fd]
-    mov rsi, 4096               ; Backlog size
-    syscall
+    SYSCALL SYS_LISTEN, [server_fd], 4096
 
     ; =========================================================================
     ; 4. EVENT REACTOR SETUP (Epoll)
     ; =========================================================================
-    mov rax, 291                ; sys_epoll_create1
-    xor rdi, rdi
-    syscall
+    SYSCALL SYS_EPOLL_CREATE1, 0
     mov [epoll_fd], rax
 
     ; Register the listening socket in the epoll instance
@@ -130,23 +114,13 @@ _start:
     mov rax, [server_fd]
     mov qword [ep_event + 4], rax
 
-    mov rax, 233                ; sys_epoll_ctl
-    mov rdi, [epoll_fd]
-    mov rsi, 1                  ; EPOLL_CTL_ADD
-    mov rdx, [server_fd]
-    lea r10, [ep_event]
-    syscall
+    SYSCALL SYS_EPOLL_CTL, [epoll_fd], 1, [server_fd], ep_event
 
     ; =========================================================================
     ; 5. MAIN REACTOR LOOP
     ; =========================================================================
 .event_loop:
-    mov rax, 232                ; sys_epoll_wait
-    mov rdi, [epoll_fd]
-    lea rsi, [epoll_events]
-    mov rdx, MAX_EVENTS
-    mov r10, -1                 ; Infinite timeout (Wait for events)
-    syscall
+    DO_SYS_EPOLL_WAIT [epoll_fd], epoll_events, MAX_EVENTS, -1
 
     mov r12, rax                ; r12 = Number of triggered events
     xor r13, r13                ; r13 = Current event index
@@ -168,11 +142,7 @@ _start:
     jmp .handle_client          ; Handle data from existing client
 
 .handle_accept:
-    mov rax, 43                 ; sys_accept
-    mov rdi, [server_fd]
-    xor rsi, rsi                ; We don't need client addr info for now
-    xor rdx, rdx
-    syscall
+    SYSCALL SYS_ACCEPT, [server_fd], 0, 0
     cmp rax, 0
     jl .next_event
     mov r15, rax                ; r15 = New Client FD
@@ -180,21 +150,12 @@ _start:
     ; Add New Client to Epoll (Wait-Free/Non-Blocking mode encouraged)
     mov dword [ep_event], 1     ; EPOLLIN
     mov qword [ep_event + 4], r15
-    mov rax, 233                ; sys_epoll_ctl
-    mov rdi, [epoll_fd]
-    mov rsi, 1                  ; EPOLL_CTL_ADD
-    mov rdx, r15
-    lea r10, [ep_event]
-    syscall
+    SYSCALL SYS_EPOLL_CTL, [epoll_fd], 1, r15, ep_event
     jmp .next_event
 
 .handle_client:
     ; Read raw HTTP request into shared buffer
-    mov rax, 0                  ; sys_read
-    mov rdi, r14
-    lea rsi, [http_buffer]
-    mov rdx, 4096
-    syscall
+    DO_SYS_READ r14, http_buffer, 4096
     cmp rax, 0
     jle .close_client           ; Close if EOF (0) or error (-1)
 
@@ -205,9 +166,7 @@ _start:
     call route_api
 
 .close_client:
-    mov rax, 3                  ; sys_close
-    mov rdi, r14
-    syscall
+    DO_SYS_CLOSE r14
 
 .next_event:
     inc r13                     ; Advance to next event in batch
@@ -215,11 +174,5 @@ _start:
 
 .fatal_error:
     ; Print error and exit with code 1
-    mov rax, 1
-    mov rdi, 1
-    lea rsi, [msg_err_sock]
-    mov rdx, msg_err_sock_l
-    syscall
-    mov rax, 60                 ; sys_exit
-    mov rdi, 1
-    syscall
+    DO_SYS_WRITE 1, msg_err_sock, msg_err_sock_l
+    SYSCALL SYS_EXIT, 1

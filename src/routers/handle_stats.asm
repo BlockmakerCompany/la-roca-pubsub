@@ -27,6 +27,8 @@ section .data
     json_p3_l       equ $ - json_p3
     json_p4         db ',"max_msgs_per_topic":'
     json_p4_l       equ $ - json_p4
+    json_ver        db ',"version":"1.4.0"'
+    json_ver_l      equ $ - json_ver
     json_p5         db '}', 10
     json_p5_l       equ $ - json_p5
 
@@ -96,6 +98,11 @@ handle_stats:
     rep movsb
     mov rax, [rt_max_messages]
     call append_number
+
+    ; --- "version" ---
+    lea rsi, [json_ver]
+    mov rcx, json_ver_l
+    rep movsb
 
     ; --- JSON Closure ---
     lea rsi, [json_p5]

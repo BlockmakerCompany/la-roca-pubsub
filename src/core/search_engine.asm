@@ -14,7 +14,7 @@ section .text
     global registry_find_lower_bound
     global compare_keys
 
-    ENTRY_SIZE equ 24           ; 16 bytes (Name) + 8 bytes (Pointer)
+    ENTRY_SIZE equ 32           ; 16 bytes (Name) + 8 bytes (Pointer) + 8 bytes (FD)
     KEY_SIZE   equ 16           ; 16 bytes static string
 
 ; -----------------------------------------------------------------------------
@@ -83,9 +83,10 @@ registry_find_lower_bound:
     ret
 
 ; -----------------------------------------------------------------------------
-; registry_find: Exact match lookup. Returns Mmap Pointer.
+; registry_find: Exact match lookup. Returns Mmap Pointer and Topic FD.
 ; Input:  RDI = Pointer to 16-byte null-padded target name
 ; Output: RAX = 64-bit Mmap Pointer (or 0 if not found)
+;         RDX = Topic File Descriptor (or 0 if not found)
 ; -----------------------------------------------------------------------------
 registry_find:
     push rbp
@@ -113,12 +114,14 @@ registry_find:
     pop rdi
     jne .not_found              ; Keys didn't match exactly
 
-    ; Found! Extract the Mmap pointer located 16 bytes after the start of the slot
+    ; Found! Extract the Mmap pointer (offset +16) and FD (offset +24)
     mov rax, [r8 + KEY_SIZE]
+    mov rdx, [r8 + KEY_SIZE + 8]
     jmp .exit
 
 .not_found:
     xor rax, rax                ; Return 0 (NULL)
+    xor rdx, rdx                ; Return 0 (FD)
 .exit:
     leave
     ret
