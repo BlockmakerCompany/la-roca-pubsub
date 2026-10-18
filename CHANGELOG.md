@@ -16,3 +16,4 @@ El formato sigue Keep a Changelog y este proyecto usa versionado semántico.
 
 ### Docs
 - sync hot-loop, binary size, and project structure to AVX2 reality
+- trim internal roadmap to remaining work
