@@ -6,7 +6,7 @@ info:
     Provides ultra-low latency message brokering using memory-mapped files (mmap) and hardware-level atomic operations.
     Features dynamic Named Topics with Auto-Provisioning, O(log N) Binary Search resolution, Batch Consumption, 
     and Hardware-Aligned Routing Keys for Stream Processing.
-  version: 1.3.0
+  version: 1.4.0
   contact:
     name: Engineering Team
 

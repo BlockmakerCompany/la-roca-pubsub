@@ -74,7 +74,8 @@ Modern message brokers (Kafka, RabbitMQ, Pulsar) are incredible tools, but they 
 │   │   ├── subscriber.asm      # O(1) offset calculation and wait-free reading
 │   │   └── dma_worker.asm      # io_uring SQE preparation (staged; not wired yet)
 │   ├── routers/                # HTTP parsing and routing
-│   │   ├── route_api.asm       # Register-based HTTP GET/POST routing
+│   │   ├── route_api.asm       # Network-facing dispatcher (socket + handlers)
+│   │   ├── parse_http_request.asm  # Pure L7 parser (AFL++ fuzz target, no side effects)
 │   │   ├── handle_batch.asm    # High-throughput sequential message collector
 │   │   ├── handle_mpub.asm     # High-performance Multi-Publish batch ingestion
 │   │   └── handle_*.asm        # Specific endpoint handlers (Stats, Live, Pub, Sub)
@@ -85,6 +86,9 @@ Modern message brokers (Kafka, RabbitMQ, Pulsar) are incredible tools, but they 
 │   ├── test_config_persistence.sh   # Env poisoning and Disk Authority audits
 │   ├── test_stability.sh            # Post-stress healthcheck (concurrent hammer)
 │   ├── bench.go                     # High-Frequency TCP concurrency benchmark
+│   ├── afl_harness.c                # AFL++ harness for the pure L7 parser
+│   ├── test_fuzz_smoke.sh           # No-crash smoke test for the fuzz harness
+│   ├── corpus/                      # AFL++ seed inputs (valid + malformed)
 │   └── run_all_tests.sh             # Master pipeline orchestrator
 ├── docs/
 │   ├── REGISTER_TOPOLOGY.md    # Canonical register pins across syscall/call boundaries
@@ -199,6 +203,19 @@ To measure the raw power of the **Zero-Copy / No-LibC** architecture, we use dir
 ```bash
 # Fails (exit 1) if any request errors; --verify adds a post-stress healthcheck
 go run tests/bench.go mpub --verify
+```
+
+### 6. Parser Fuzzing (AFL++)
+The L7 router is extracted into a pure, side-effect-free parser (`parse_http_request`) so it can be fuzzed for memory safety without touching the network or the engine.
+```bash
+# Build the harness (gcc by default; pass FUZZ_CC=afl-gcc for AFL++ instrumentation)
+make fuzz
+
+# Local no-crash smoke test (corpus seeds + edge cases + random burst)
+./tests/test_fuzz_smoke.sh
+
+# Real fuzzing campaign (requires AFL++; add -Q for QEMU mode to instrument the asm)
+afl-fuzz -i tests/corpus -o tests/findings ./bin/fuzz_parser
 ```
 
 > **Note:** Because the engine bypasses `libc` and uses a zero-allocation event loop, you will likely saturate your local network loopback interface before maxing out the CPU.
@@ -427,6 +444,7 @@ Because this engine is built with a **Zero-Allocation, libc-free architecture**,
 - [x] JSON Metrics Endpoint (`/stats`)
 - [x] **Multi-Publish (`/mpub`) Batched Ingestion**
 - [x] **Stream Processing Readiness (Hardware-Aligned Routing Keys)**
+- [x] **Zero-Copy `sys_sendfile` Delivery** (`/sub` bypasses user-space payload copy)
 - [ ] **HTTP/1.1 Keep-Alive & Epoll Persistence** (Bypass TCP 3-way handshake & `sys_close` overhead)
 - [ ] JIT Stream Processor (Wasm/eBPF integration)
 - [ ] Asynchronous DMA Worker via `io_uring`

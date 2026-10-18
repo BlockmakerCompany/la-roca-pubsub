@@ -95,6 +95,8 @@ Parsing HTTP headers string-by-string is slow. La Roca's router (`route_api.asm`
 * Instead of comparing strings, it loads the first 4 bytes of the socket buffer into the `EAX` register and compares them as a raw hexadecimal integer: `cmp eax, 0x20544547` (which translates perfectly to `"GET "`).
 * Illegal verbs (e.g., `DELETE`, `PUT`) instantly trigger an elegant HTTP `400 Bad Request` fallback, dropping the payload while preserving HTTP/1.1 keep-alive compliance without allocating error objects.
 
+In v1.4.0, the pure parsing logic was extracted into `parse_http_request.asm` (no syscalls, no handlers, no side effects) so it can be fuzzed independently of the engine. Delivery on `/sub` also switched from `sys_write` to zero-copy `sys_sendfile`: the topic FD is now kept open in the registry, and `locate_message` returns the payload's file offset + length without copying it into user space.
+
 ### 3.2 The Hot Loop (Batching & MPUB)
 
 To bypass the physical limits of the TCP loopback interface, La Roca introduces batched endpoints (`/mpub` and `/batch`).
@@ -136,6 +138,7 @@ In the absence of a high-level compiler’s safety nets, we relied on a brutal *
 
 * **Header Overflows:** Giant routing keys (e.g., 1000 bytes) are instantly intercepted and safely truncated to `ROCK_KEY_SIZE` via the `cmovg` instruction, preventing buffer overflows into adjacent slots.
 * **Delimiter Flooding:** The `/mpub` endpoint is shielded against "Empty Message Bombs" (consecutive `\n` flooding) via hardware-level zero-length guards (`test r8, r8 / jz .skip`), ensuring the Ring Buffer sequences are never wasted by malicious or malformed payloads.
+* **Parser Fuzzing (v1.4.0):** `parse_http_request` is extracted as a pure, side-effect-free parser and fuzzed via an AFL++ harness (`make fuzz`), with a local no-crash smoke test (`tests/test_fuzz_smoke.sh`) for CI.
 
 ---
 
@@ -155,7 +158,7 @@ La Roca is designed to be the circulatory system of a high-performance microserv
 
 * **Design & Architecture:** Fernando Ezequiel Mancuso
 * **Organization:** [BlockmakerCompany](https://github.com/BlockmakerCompany)
-* **Release:** March 2026 | v1.3.0
+* **Release:** March 2026 | v1.4.0
 * **Inquiries:** For industrial integration or low-level consulting, reach out via [GitHub Issues](https://github.com/BlockmakerCompany/la-roca-pubsub/issues).
 
 > *"The best way to understand how a computer works is to stop asking the operating system for permission and start giving it orders."*

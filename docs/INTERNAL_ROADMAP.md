@@ -15,6 +15,8 @@ While the main `README.md` outlines high-level features (like HTTP/1.1 Keep-Aliv
 While La Roca currently saturates network interfaces by eliminating `libc` overhead, the consumer fan-out process and state tracking still have room for extreme low-level optimization. Our goal is to completely bypass user-space memory copying and implement stateless, resilient offset tracking.
 
 ### 1.1. True Zero-Copy Payload Delivery (`sys_sendfile`)
+> ✅ **Implemented in v1.4.0.** The registry now stores the open topic FD; `handle_sub` sends headers via `sys_write` and the payload via `sys_sendfile` (`locate_message` in `subscriber.asm` returns the file offset + length without copying).
+
 Currently, when a subscriber requests a message, the engine calculates the $O(1)$ `mmap` pointer, loads the payload into the L1 cache, and dispatches it to the socket buffer using `sys_write`. For massive fan-out scenarios (1 publisher to 10,000 subscribers), this pollutes the CPU cache unnecessarily.
 
 **The Goal:** Instruct the Linux Kernel to transfer bytes directly from the page cache (the topic file) to the network socket buffer, ensuring the payload bytes never touch user-space registers.
@@ -104,6 +106,8 @@ mov r12, rax
 Building a network-facing router in pure x86_64 Assembly removes the memory safety nets provided by compilers like Rust or Go. A single off-by-one error in our L7 HTTP parser could lead to a buffer over-read or a catastrophic segmentation fault. To mitigate this, we rely on mathematically proven boundaries and continuous automated fuzzing.
 
 ### 3.1. Continuous Fuzzing Pipeline (AFL++)
+> ✅ **Implemented in v1.4.0.** `parse_http_request` extracted to `src/routers/parse_http_request.asm` (pure, no side effects); `tests/afl_harness.c` + `make fuzz` + `tests/test_fuzz_smoke.sh` added. Run `afl-fuzz -i tests/corpus -o tests/findings ./bin/fuzz_parser` for the campaign.
+
 Our custom HTTP router (`route_api.asm`) manually inspects network buffers in the L1 cache. Because we expect highly specific structures (like `cmp eax, 0x20544547` for `"GET "`), an attacker might send malformed bytes to trick our bitmasking logic.
 
 **The Goal:** Prove the absolute memory safety of the L7 Router by bombarding it with mutated payloads using AFL++ (American Fuzzy Lop).
