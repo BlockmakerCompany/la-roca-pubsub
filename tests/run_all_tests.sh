@@ -44,6 +44,7 @@ run_suite() {
 run_suite "tests/test_config_persistence.sh" "Config & Disk Authority"
 run_suite "tests/test_e2e.sh"                "Functional & Mmap Logic"
 run_suite "tests/test_security.sh"           "Security Hardening & Protocol"
+run_suite "tests/test_stability.sh"          "Post-Stress Stability (Concurrent Hammer)"
 
 # --- 2. Optional Stress Testing (Go Benchmark) ---
 if [[ "$1" == "--stress" ]]; then
@@ -51,8 +52,8 @@ if [[ "$1" == "--stress" ]]; then
 
     # Check if Go is installed
     if command -v go &> /dev/null; then
-        echo -e "${YELLOW}Target: > 3,000,000 Messages / sec (Multi-Publish)${NC}"
-        go run tests/bench.go mpub
+        echo -e "${YELLOW}Target: high-throughput Multi-Publish with post-stress healthcheck${NC}"
+        go run tests/bench.go mpub --verify
 
         if [ $? -ne 0 ]; then
             echo -e "${RED}❌ Stress test failed or crashed the engine.${NC}"
