@@ -1,6 +1,6 @@
 # Architecture of La Roca Micro-PubSub: The Zero-Abstraction Broker
 
-La Roca Micro-PubSub is an exercise in uncompromising efficiency and mechanical sympathy. In an ecosystem dominated by heavy JVM message brokers, Garbage Collection pauses, and bloated distributed consensus protocols, this document explores the low-level mechanics—from `lock xadd` atomics to $O(1)$ memory mapping—that allow a sub-10KB x86_64 Assembly engine to route, batch, and stream over **2,750,000 Messages Per Second** with zero dynamic allocations.
+La Roca Micro-PubSub is an exercise in uncompromising efficiency and mechanical sympathy. In an ecosystem dominated by heavy JVM message brokers, Garbage Collection pauses, and bloated distributed consensus protocols, this document explores the low-level mechanics—from `lock xadd` atomics to $O(1)$ memory mapping—that allow a ~14KB (stripped) x86_64 Assembly engine to route, batch, and stream over **2,750,000 Messages Per Second** with zero dynamic allocations.
 
 ---
 
@@ -98,7 +98,7 @@ Parsing HTTP headers string-by-string is slow. La Roca's router (`route_api.asm`
 ### 3.2 The Hot Loop (Batching & MPUB)
 
 To bypass the physical limits of the TCP loopback interface, La Roca introduces batched endpoints (`/mpub` and `/batch`).
-When ingesting a multi-publish payload separated by `\n`, the engine establishes an Assembly "Hot Loop". It scans the raw socket buffer byte-by-byte in register memory, surgically calculating payload lengths, and pushing them sequentially into the Ring Buffer while preserving loop counters in the hardware stack (`push rcx`, `push r8`). This reduces network syscalls by 99%.
+When ingesting a multi-publish payload separated by `\n`, the engine establishes an Assembly "Hot Loop". On AVX2-capable CPUs it scans the raw socket buffer with a SIMD path — broadcasting the delimiter with `vpbroadcastb`, comparing 32 bytes at once with `vpcmpeqb`, and extracting the match offset with `vpmovmskb` + `tzcnt`; on CPUs without AVX2 it falls back to a scalar byte-by-byte scan. The path is chosen at boot by `src/core/cpu_features.asm` (`cpuid`/`xgetbv`). This reduces network syscalls by 99%.
 
 ```mermaid
 graph LR
@@ -128,6 +128,8 @@ To eliminate the "algorithmic drift" common in LLM-generated code, we enforced r
 
 This was solved through strict **Tactical Stack Shielding**, re-pinning base pointers to non-volatile registers (`r12`) and manually auditing every `push`/`pop` balance to ensure the execution state survived nested subroutine jumps.
 
+A second ABI bug surfaced under concurrency stress: in the `/mpub` epilogue, the stack-pointer fix-up (`add rsp, 32`) was emitted *before* the `pop` sequence, so the callee-saved registers (`r12`–`r15`, `rbx`) were restored from the wrong offsets. The engine hung — the event loop stayed alive but stopped answering. The fix moved the `add rsp, 32` *after* the pops, matching the convention of every other handler. The canonical pins for each register across `syscall`/`call` boundaries are documented in `docs/REGISTER_TOPOLOGY.md`.
+
 ### 4.2 Security Hardening & Fuzzing
 
 In the absence of a high-level compiler’s safety nets, we relied on a brutal **Test-Driven Assembly** workflow to catch memory violations before they reached the disk.
@@ -143,7 +145,7 @@ La Roca is designed to be the circulatory system of a high-performance microserv
 
 * **⚡ JIT Stream Processor:** Integrating eBPF/Wasm runtimes directly into the mmap consumer path for on-the-fly payload transformations.
 * **📡 io_uring Migration:** Transitioning from standard synchronous syscalls (`epoll`) to Linux `io_uring` for true asynchronous, zero-copy I/O.
-* **🌍 Aarch64 Porting:** Bringing La Roca’s sub-10KB efficiency to ARM64 architectures, targeting high-density AWS Graviton instances.
+* **🌍 Aarch64 Porting:** Bringing La Roca’s ~14KB (stripped) efficiency to ARM64 architectures, targeting high-density AWS Graviton instances.
 
 ---
 

@@ -13,3 +13,6 @@ El formato sigue Keep a Changelog y este proyecto usa versionado semántico.
 
 ### Fixed
 - align callee-saved register restore in handle_mpub epilogue
+
+### Docs
+- sync hot-loop, binary size, and project structure to AVX2 reality
