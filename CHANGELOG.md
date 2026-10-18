@@ -8,6 +8,9 @@ The format follows Keep a Changelog and this project uses semantic versioning.
 ### Added
 - instrument the parser assembly with AFL++ edges for real coverage
 
+### Fixed
+- address PR #5 review feedback (TOCTOU, sendfile, FD leak, CPUID)
+
 ### Docs
 - document afl-clang-fast and QEMU coverage limitation
 - add CONTRIBUTING.md and translate repo to English

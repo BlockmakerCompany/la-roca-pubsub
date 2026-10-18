@@ -78,6 +78,8 @@ create_new_topic:
     push r14
     push r15
 
+    mov r13, -1                 ; Sentinel: no FD opened yet (used by .fail)
+
     mov r12, rdi
     call build_path_from_name
 
@@ -177,6 +179,15 @@ create_new_topic:
     jmp .exit
 
 .fail:
+    ; Close the topic FD if it was opened before the failure, to avoid leaking
+    ; a descriptor on every failed create_new_topic (the open happens before the
+    ; mmap step that can still fail).
+    cmp r13, -1
+    je .fail_no_fd
+    mov rax, SYS_CLOSE
+    mov rdi, r13
+    syscall
+.fail_no_fd:
     xor rax, rax
     xor rdx, rdx
 .exit:

@@ -40,6 +40,14 @@ detect_cpu_features:
     jne .done
 
     ; --- 3. CPUID leaf 7 subleaf 0: require AVX2 (EBX bit 5) ---
+    ; First verify the CPU actually supports leaf 7: on pre-Haswell hardware
+    ; (or VMs with filtered CPUID) querying leaf 7 returns undefined EBX, which
+    ; could set AVX2 spuriously and crash with #UD on vpcmpeqb.
+    xor eax, eax
+    cpuid
+    cmp eax, 7
+    jb .done                    ; max leaf < 7 -> AVX2 impossible
+
     mov eax, 7
     xor ecx, ecx
     cpuid

@@ -252,12 +252,21 @@ handle_sub:
     syscall
 
     ; Zero-copy payload: sendfile(out_fd, in_fd, &offset, count)
+    ; Loop to handle short writes: the kernel advances *sendfile_offset by the
+    ; number of bytes actually sent, so the next iteration continues where the
+    ; previous one stopped. A non-positive return (0 = EOF, <0 = error) ends
+    ; the loop instead of hanging the client on a truncated body.
+.sendfile_loop:
     mov rax, SYS_SENDFILE
     mov rdi, r12                 ; out_fd = client socket
     mov rsi, rbx                 ; in_fd  = topic file descriptor
-    lea rdx, [sendfile_offset]   ; pointer to off_t offset
-    mov r10, r15                 ; count = payload length
+    lea rdx, [sendfile_offset]   ; pointer to off_t offset (updated by kernel)
+    mov r10, r15                 ; count = remaining payload length
     syscall
+    test rax, rax
+    jle .exit                    ; 0 = EOF, <0 = error; stop sending
+    sub r15, rax                 ; r15 -= bytes sent this round
+    jg .sendfile_loop            ; more payload to send
     jmp .exit
 
 .send_400:

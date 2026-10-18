@@ -79,7 +79,7 @@ AFL_RT = /usr/lib/afl/afl-compiler-rt.o
 FUZZ_AFL_BIN = $(BIN_DIR)/fuzz_parser_afl
 
 .PHONY: fuzz
-fuzz: dirs $(BUILD_DIR)/parse_http_request.o
+fuzz: dirs $(BUILD_DIR)/parse_http_request.o tests/afl_harness.c
 	$(FUZZ_CC) -o $(FUZZ_BIN) tests/afl_harness.c $(BUILD_DIR)/parse_http_request.o
 	@echo "Fuzz harness built: $(FUZZ_BIN)"
 
@@ -88,7 +88,7 @@ $(BUILD_DIR)/parse_http_request_afl.o: src/routers/parse_http_request.asm
 	$(ASM) $(ASMFLAGS) -DAFL_INSTRUMENTED -i $(SRC_DIR)/ -i $(CORE_DIR)/ -i $(SRC_DIR)/include/ -o $@ $<
 
 .PHONY: fuzz-afl
-fuzz-afl: dirs $(BUILD_DIR)/parse_http_request_afl.o
+fuzz-afl: dirs $(BUILD_DIR)/parse_http_request_afl.o tests/afl_harness.c
 	$(FUZZ_CC) -no-pie -o $(FUZZ_AFL_BIN) tests/afl_harness.c $(BUILD_DIR)/parse_http_request_afl.o $(AFL_RT)
 	@echo "AFL-instrumented fuzz harness built: $(FUZZ_AFL_BIN)"
 

@@ -43,10 +43,11 @@ registry_insert:
     push rbx
     push r12
     push r13
+    push r14
 
     mov r12, rdi                ; R12 = New Topic Name Ptr
     mov r13, rsi                ; R13 = Mmap Ptr
-    mov r10, rdx                ; R10 = Topic FD
+    mov r14, rdx                ; R14 = Topic FD (callee-saved; R10 is volatile)
 
     mov r8, [topic_count]
     cmp r8, MAX_TOPICS
@@ -122,7 +123,7 @@ registry_insert:
     ; Write the 8-byte Mmap Pointer directly after the name
     mov [rdi], r13
     ; Write the 8-byte File Descriptor after the mmap pointer
-    mov [rdi + 8], r10
+    mov [rdi + 8], r14
 
     inc qword [topic_count]     ; Atomically increment the total count
     mov rax, 1                  ; Return 1 (Success)
@@ -132,6 +133,7 @@ registry_insert:
     xor rax, rax                ; Return 0 (Failure)
 
 .exit:
+    pop r14
     pop r13
     pop r12
     pop rbx

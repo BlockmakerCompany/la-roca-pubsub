@@ -102,9 +102,11 @@ consume_message:
     ; Calculate maximum copy size: MsgSize - 9 - KeySize
     mov rcx, r15            ; RCX = Dest Capacity
     mov rax, [rt_msg_size]
-    sub rax, 9              ; Subtract Status and Seq
-    sub rax, [rt_key_size]  ; Subtract Key Size
-    js .not_ready           ; Guard: If math is negative, geometry is broken
+    mov rdx, 9
+    add rdx, [rt_key_size]  ; RDX = 9 + key_size
+    cmp rax, rdx
+    jbe .not_ready          ; msg_size <= 9 + key_size -> no payload
+    sub rax, rdx            ; RAX = payload length (> 0)
 
     cmp rcx, rax
     cmovg rcx, rax          ; Truncate if user buffer is smaller than payload
@@ -179,13 +181,24 @@ locate_message:
     cmp rcx, r13
     jne .not_ready
 
+    ; Double-check: the publisher could have recycled the slot between the two
+    ; reads above. Re-validate status to close the TOCTOU window.
+    cmp byte [rbx], 2
+    jne .not_ready
+
     ; 5. Payload offset (skip Status + Seq + Key) and length
     add rax, 9
     add rax, [rt_key_size]      ; RAX = payload offset in file
+
+    ; Geometry guard: payload length must be strictly positive. Use unsigned
+    ; arithmetic so a zero-length payload or a 64-bit underflow (msg_size <
+    ; 9 + key_size) is rejected instead of silently served.
     mov rdx, [rt_msg_size]
-    sub rdx, 9
-    sub rdx, [rt_key_size]      ; RDX = payload length
-    js .not_ready               ; geometry broken if negative
+    mov rcx, 9
+    add rcx, [rt_key_size]      ; RCX = 9 + key_size
+    cmp rdx, rcx
+    jbe .not_ready              ; msg_size <= 9 + key_size -> no payload
+    sub rdx, rcx                ; RDX = payload length (> 0)
     jmp .exit
 
 .not_ready:
