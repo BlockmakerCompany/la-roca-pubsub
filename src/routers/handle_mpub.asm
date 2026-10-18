@@ -310,11 +310,11 @@ handle_mpub:
     DO_SYS_WRITE r12, res_mpub_500, res_mpub_500_len
 
 .exit:
-    add rsp, 32                 ; Clear local stack variables
     pop rbx
     pop r15
     pop r14
     pop r13
     pop r12
+    add rsp, 32                 ; Clear local stack variables
     pop rbp
     ret
