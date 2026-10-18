@@ -58,4 +58,18 @@ clean:
 run: all
 	./$(TARGET)
 
-.PHONY: all dirs clean run
+# -----------------------------------------------------------------------------
+# Fuzzing target: build the AFL++ harness for the pure L7 parser.
+#   make fuzz                 -> gcc (plain harness, for smoke testing)
+#   make fuzz FUZZ_CC=afl-gcc -> AFL++-instrumented harness
+# Then: afl-fuzz -i tests/corpus -o tests/findings ./bin/fuzz_parser
+# -----------------------------------------------------------------------------
+FUZZ_CC ?= gcc
+FUZZ_BIN = $(BIN_DIR)/fuzz_parser
+
+.PHONY: fuzz
+fuzz: dirs $(BUILD_DIR)/parse_http_request.o
+	$(FUZZ_CC) -o $(FUZZ_BIN) tests/afl_harness.c $(BUILD_DIR)/parse_http_request.o
+	@echo "Fuzz harness built: $(FUZZ_BIN)"
+
+.PHONY: all dirs clean run fuzz

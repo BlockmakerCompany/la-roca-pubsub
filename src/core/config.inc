@@ -33,6 +33,16 @@
 %define EPOLLIN 1
 %define EPOLL_CTL_ADD 1
 
+; HTTP Route Codes (parse_http_request return values)
+%define ROUTE_NOT_HANDLED 0
+%define ROUTE_LIVE        1
+%define ROUTE_STATS       2
+%define ROUTE_SUB         3
+%define ROUTE_BATCH       4
+%define ROUTE_PUB         5
+%define ROUTE_MPUB        6
+%define ROUTE_BAD_TOPIC   7
+
 ; Common Syscalls (x86_64)
 %define SYS_READ      0
 %define SYS_WRITE     1
