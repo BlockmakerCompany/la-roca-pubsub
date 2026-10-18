@@ -5,6 +5,9 @@ El formato sigue Keep a Changelog y este proyecto usa versionado semántico.
 
 ## [Unreleased]
 
+### Docs
+- document afl-clang-fast and QEMU coverage limitation
+
 ## [v1.4.0] - 2026-10-18
 
 ### Added

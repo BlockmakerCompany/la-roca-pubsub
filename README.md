@@ -208,15 +208,22 @@ go run tests/bench.go mpub --verify
 ### 6. Parser Fuzzing (AFL++)
 The L7 router is extracted into a pure, side-effect-free parser (`parse_http_request`) so it can be fuzzed for memory safety without touching the network or the engine.
 ```bash
-# Build the harness (gcc by default; pass FUZZ_CC=afl-gcc for AFL++ instrumentation)
+# Build the harness (gcc by default). For AFL++ instrumentation use the
+# -fast variant: plain afl-gcc is obsolete in AFL++ 4.x.
 make fuzz
+make fuzz FUZZ_CC=afl-clang-fast
 
 # Local no-crash smoke test (corpus seeds + edge cases + random burst)
 ./tests/test_fuzz_smoke.sh
 
-# Real fuzzing campaign (requires AFL++; add -Q for QEMU mode to instrument the asm)
-afl-fuzz -i tests/corpus -o tests/findings ./bin/fuzz_parser
+# Real fuzzing campaign (90s bounded; exit 0 = no crashes found)
+afl-fuzz -i tests/corpus -o tests/findings -V 90 -- ./bin/fuzz_parser
 ```
+
+> **Coverage note:** `afl-clang-fast` instruments the C harness only. To get
+> branch coverage over the hand-written assembly you need QEMU mode (`-Q`),
+> which requires `afl-qemu-trace` — not shipped in the Ubuntu `afl++` package;
+> build it from source with `build_qemu_support.sh` after installing `qemu-user`.
 
 > **Note:** Because the engine bypasses `libc` and uses a zero-allocation event loop, you will likely saturate your local network loopback interface before maxing out the CPU.
 

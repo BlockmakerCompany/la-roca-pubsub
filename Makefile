@@ -60,9 +60,13 @@ run: all
 
 # -----------------------------------------------------------------------------
 # Fuzzing target: build the AFL++ harness for the pure L7 parser.
-#   make fuzz                 -> gcc (plain harness, for smoke testing)
-#   make fuzz FUZZ_CC=afl-gcc -> AFL++-instrumented harness
-# Then: afl-fuzz -i tests/corpus -o tests/findings ./bin/fuzz_parser
+#   make fuzz                       -> gcc (plain harness, for smoke testing)
+#   make fuzz FUZZ_CC=afl-clang-fast -> AFL++-instrumented harness (afl-gcc is
+#                                       obsolete in AFL++ 4.x; use -fast variants)
+# Then: afl-fuzz -i tests/corpus -o tests/findings -V 90 -- ./bin/fuzz_parser
+# NOTE: this instruments the C harness only. To instrument the hand-written
+# assembly you need QEMU mode (-Q), which requires afl-qemu-trace (not shipped
+# in the Ubuntu afl++ package; build it from source via build_qemu_support.sh).
 # -----------------------------------------------------------------------------
 FUZZ_CC ?= gcc
 FUZZ_BIN = $(BIN_DIR)/fuzz_parser
