@@ -1,63 +1,63 @@
-# Fuzzing del router L7 (AFL++ con cobertura real del assembly)
+# L7 Router Fuzzing (AFL++ with real assembly coverage)
 
-Este documento explica **cómo** fuzzeamos el router HTTP de La Roca, **por qué**
-la cobertura guiada sobre assembly a mano no es trivial, y **qué resultados**
-obtuvimos. Es el respaldo técnico de la afirmación de robustez del motor.
+This document explains **how** we fuzz La Roca's HTTP router, **why** guided
+coverage over hand-written assembly is non-trivial, and **what results** we got.
+It is the technical backing for the engine's robustness claim.
 
 ---
 
-## 1. Qué se fuzzea y por qué
+## 1. What we fuzz and why
 
-El punto de entrada de red de La Roca es el parser L7 (`src/routers/parse_http_request.asm`).
-Es el primer código que toca **cualquier byte que llega por el socket**, y por lo
-tanto es la mayor superficie de ataque (malformed requests, desbordes, lecturas
-fuera de rango). Si este parser tiene un bug de memoria, el motor entero cae.
+The network entry point of La Roca is the L7 parser (`src/routers/parse_http_request.asm`).
+It is the first code that touches **any byte arriving on the socket**, and is
+therefore the largest attack surface (malformed requests, overflows, out-of-range
+reads). If this parser has a memory bug, the whole engine goes down.
 
-Lo extrajimos a un módulo **puro** —sin syscalls, sin handlers, sin side effects—,
-de modo que se pueda fuzzear de forma aislada, sin red ni motor:
+We extracted it into a **pure** module —no syscalls, no handlers, no side effects—,
+so it can be fuzzed in isolation, without network or engine:
 
 ```asm
 ; parse_http_request(buffer_ptr, length) -> route_code
-; Sin syscalls, sin estado global, sin efectos colaterales.
+; No syscalls, no global state, no side effects.
 ```
 
-El harness (`tests/afl_harness.c`) lee STDIN, llama al parser y sale. AFL++ usa su
-fork-server para reiniciar el proceso por cada mutación, así que un segfault
-aparece inmediatamente como crash.
+The harness (`tests/afl_harness.c`) reads STDIN, calls the parser and exits.
+AFL++ uses its fork-server to restart the process on every mutation, so a segfault
+shows up immediately as a crash.
 
 ---
 
-## 2. El problema: el assembly no se instrumenta solo
+## 2. The problem: assembly does not instrument itself
 
-`afl-clang-fast` instrumenta **el código C** que compila. Pero el parser es
-**assembly ensamblado con NASM**: afl-clang-fast no lo toca. El resultado es una
-ilusión de cobertura: el harness C tiene 2 bloques básicos, así que `afl-showmap`
-reportaba siempre **2 tuples con el mismo hash**, sin importar el input.
+`afl-clang-fast` instruments **the C code** it compiles. But the parser is
+**assembly assembled with NASM**: afl-clang-fast does not touch it. The result is
+an illusion of coverage: the C harness has 2 basic blocks, so `afl-showmap`
+always reported **2 tuples with the same hash**, regardless of the input.
 
-Esto se verificó empíricamente:
+This was verified empirically:
 
 ```bash
 $ afl-showmap -- ./bin/fuzz_parser < seed1  # 2 tuples
-$ afl-showmap -- ./bin/fuzz_parser < seed2  # 2 tuples, mismo hash
+$ afl-showmap -- ./bin/fuzz_parser < seed2  # 2 tuples, same hash
 ```
 
-Sin cobertura diferenciada, afl-fuzz **no puede guiarse** hacia caminos nuevos.
-Las dos vías para arreglarlo:
+Without differentiated coverage, afl-fuzz **cannot steer itself** toward new paths.
+The two ways to fix it:
 
-| Vía | Mecanismo | Costo |
+| Path | Mechanism | Cost |
 |-----|-----------|-------|
-| QEMU mode (`-Q`) | `afl-qemu-trace` emula e instrumenta el binario | Compilar QEMU parcheado (~40 min, GB de disco) + `qemu-user`, `meson`, `libglib2.0-dev`, `bison`, `flex` |
-| **Instrumentación manual** ✅ | Marcar cada bloque básico con un `call __afl_trace` | Ninguna dependencia extra; el runtime ya venía en `afl-compiler-rt.o` |
+| QEMU mode (`-Q`) | `afl-qemu-trace` emulates and instruments the binary | Compile patched QEMU (~40 min, GB of disk) + `qemu-user`, `meson`, `libglib2.0-dev`, `bison`, `flex` |
+| **Manual instrumentation** ✅ | Mark each basic block with a `call __afl_trace` | No extra dependencies; the runtime already shipped in `afl-compiler-rt.o` |
 
-Elegimos la **instrumentación manual**: logra la misma cobertura real, sin
-sudo ni builds pesados, y además es fiel al espíritu del proyecto (todo a mano,
-sin dependencias).
+We chose **manual instrumentation**: it achieves the same real coverage, without
+sudo or heavy builds, and it is faithful to the project's spirit (everything by
+hand, no dependencies).
 
 ---
 
-## 3. Cómo instrumentamos el assembly
+## 3. How we instrumented the assembly
 
-En `parse_http_request.asm` definimos una macro condicional:
+In `parse_http_request.asm` we defined a conditional macro:
 
 ```asm
 %ifdef AFL_INSTRUMENTED
@@ -74,7 +74,7 @@ En `parse_http_request.asm` definimos una macro condicional:
     push r11
     push rbx
     mov rbx, rsp
-    and rsp, -16          ; stack alineado a 16 para el call (SysV)
+    and rsp, -16          ; stack aligned to 16 for the call (SysV)
     mov edi, %1
     call __afl_trace
     mov rsp, rbx
@@ -90,85 +90,85 @@ En `parse_http_request.asm` definimos una macro condicional:
     pop rax
 %endmacro
 %else
-%macro AFL_EDGE 1        ; build de producción: no genera nada
+%macro AFL_EDGE 1        ; production build: emits nothing
 %endmacro
 %endif
 ```
 
-Cada bloque básico del router lleva un `AFL_EDGE <id>` con un id único (17 edges
-en total: entrada, GET/POST, cada ruta, y cada rama del validador de topics).
-`__afl_trace(id)` implementa el contador **neverZero** del mapa compartido:
+Each basic block of the router carries an `AFL_EDGE <id>` with a unique id (17
+edges in total: entry, GET/POST, each route, and each branch of the topic
+validator). `__afl_trace(id)` implements the **neverZero** counter over the
+shared map:
 
 ```c
 void __afl_trace(const u32 x) {
     PREV_LOC_T prev = __afl_prev_loc[0];
     __afl_prev_loc[0] = (x >> 1);
     u8 *p = &__afl_area_ptr[prev ^ x];
-    // incremento con protección de desborde (nunca vuelve a 0)
+    // increment with overflow protection (never wraps back to 0)
     ...
 }
 ```
 
-Propiedades clave:
+Key properties:
 
-- **Producción intacta**: sin `-DAFL_INSTRUMENTED`, `AFL_EDGE` expande a nada.
-  El binario de producción es byte-identical al de un build sin instrumentar.
-- **Registros preservados**: la macro salva/restaura todos los registros
-  caller-saved (y `rbx`), así que no altera la semántica del parser.
-- **Stack siempre alineado**: `and rsp, -16` garantiza el ABI SysV del `call`
-  independientemente de si el edge está en el cuerpo del prologue o en la
-  entrada de un `call`-target.
+- **Production untouched**: without `-DAFL_INSTRUMENTED`, `AFL_EDGE` expands to
+  nothing. The production binary is byte-identical to an uninstrumented build.
+- **Registers preserved**: the macro saves/restores all caller-saved registers
+  (and `rbx`), so it does not alter the parser's semantics.
+- **Stack always aligned**: `and rsp, -16` guarantees the SysV ABI of the `call`
+  regardless of whether the edge sits in a prologue body or at a `call`-target
+  entry.
 
 ---
 
-## 4. Cómo construir y verificar cobertura
+## 4. How to build and verify coverage
 
 ```bash
-# Build del harness instrumentado (assembly + runtime AFL)
+# Build the instrumented harness (assembly + AFL runtime)
 make fuzz-afl
 
-# Verificar que la cobertura es REAL (varía por input)
+# Verify that coverage is REAL (varies by input)
 afl-showmap -o /tmp/map -- ./bin/fuzz_parser_afl < tests/corpus/get_live.txt
-#   -> 3 tuples (antes: 2 tuples idénticos para todo)
+#   -> 3 tuples (before: 2 identical tuples for everything)
 
-# Smoke test sin crash (corpus + edge cases + ráfaga aleatoria)
+# No-crash smoke test (corpus + edge cases + random burst)
 ./tests/test_fuzz_smoke.sh
 ```
 
 ---
 
-## 5. Campaña real
+## 5. Real campaign
 
 ```bash
 afl-fuzz -i tests/corpus -o tests/findings -V 300 -- ./bin/fuzz_parser_afl
 ```
 
-Resultados (`tests/findings/default/fuzzer_stats`):
+Results (`tests/findings/default/fuzzer_stats`):
 
-| Métrica | Valor |
+| Metric | Value |
 |---------|-------|
-| Duración | 300 s |
-| Ejecuciones totales | **2.712.732** |
-| Velocidad | **9.042 exec/s** |
-| Ciclos de cola completos | 1.765 |
-| Edges alcanzados (de 17 bloques básicos) | **15** |
+| Duration | 300 s |
+| Total executions | **2,712,732** |
+| Speed | **9,042 exec/s** |
+| Full queue cycles | 1,765 |
+| Edges reached (of 17 basic blocks) | **15** |
 | **Crashes** | **0** |
 | Hangs | 0 |
 
 ---
 
-## 6. Robustez + eficiencia: la foto completa
+## 6. Robustness + efficiency: the full picture
 
-El fuzzing demuestra la **robustez** (0 crashes tras cientos de miles de
-mutaciones guiadas sobre el punto de entrada de red). La **eficiencia** se
-demuestra con el benchmark de concurrencia (`tests/bench.go`), que en el entorno
-de CI dio:
+Fuzzing demonstrates **robustness** (0 crashes after hundreds of thousands of
+guided mutations over the network entry point). **Efficiency** is demonstrated by
+the concurrency benchmark (`tests/bench.go`), which in the CI environment gave:
 
-| Métrica | Valor |
+| Metric | Value |
 |---------|-------|
-| Throughput | **27.558 req/s** |
-| Mensajes/s (batch de 100) | **~2.755.800 msg/s** |
-| Errores | 0 |
+| Throughput | **27,558 req/s** |
+| Messages/s (batch of 100) | **~2,755,800 msg/s** |
+| Errors | 0 |
 
-En conjunto: un router L7 que aguanta fuzzing agresivo sin un solo crash y que
-sostiene ~2,7 millones de mensajes por segundo sobre el loopback local.
+Together: an L7 router that withstands aggressive fuzzing without a single crash
+and sustains ~2.7 million messages per second over local loopback.

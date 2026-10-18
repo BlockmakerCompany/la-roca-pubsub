@@ -1,15 +1,16 @@
 # Changelog
 
-Todas las modificaciones notables de este proyecto se documentan en este archivo.
-El formato sigue Keep a Changelog y este proyecto usa versionado semántico.
+All notable changes to this project are documented in this file.
+The format follows Keep a Changelog and this project uses semantic versioning.
 
 ## [Unreleased]
 
 ### Added
-- instrumentar el parser assembly con edges AFL++ para cobertura real
+- instrument the parser assembly with AFL++ edges for real coverage
 
 ### Docs
 - document afl-clang-fast and QEMU coverage limitation
+- add CONTRIBUTING.md and translate repo to English
 
 ## [v1.4.0] - 2026-10-18
 
