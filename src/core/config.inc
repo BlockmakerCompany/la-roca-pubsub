@@ -3,6 +3,26 @@
 ; Project: La Roca Micro-PubSub
 ; Responsibility: System-wide macros, syscall definitions, and constants.
 ; -----------------------------------------------------------------------------
+;
+; ⚡ REGISTER TOPOLOGY MAP (The Sacred ABI)
+;   In a zero-libc kernel, losing register state across a syscall or `call`
+;   means a segfault. These pins are ENFORCED engine-wide:
+;
+;   PINNED (callee-saved, never used for temp math):
+;     R12 = mmap base pointer of the active topic (or loop bookkeeping).
+;     R13 = global sequence counter address / loop bookkeeping.
+;     RBP / RSP = stack frame. Before a `call`, RSP MUST be 16-byte aligned.
+;
+;   VOLATILE (assume destroyed after any syscall):
+;     RAX, RCX, RDX, RSI, RDI, R8-R11.
+;     RCX and R11 are ALWAYS clobbered by the kernel (RIP/RFLAGS save slots).
+;     Push/pop any of these around a syscall if the /mpub loop still needs them.
+;
+;   CALLEE-SAVED (preserved across `call` per System V AMD64 ABI):
+;     RBX, RBP, R12-R15. Subroutines that use them MUST push/pop them.
+;
+;   Full rationale: docs/REGISTER_TOPOLOGY.md
+; -----------------------------------------------------------------------------
 
 ; Logger Levels
 %define LOG_INFO  0
@@ -20,7 +40,9 @@
 %define SYS_CLOSE     3
 %define SYS_LSEEK     8
 %define SYS_MMAP      9
+%define SYS_MREMAP    25
 %define SYS_MSYNC     26
+%define SYS_SENDFILE  40
 %define SYS_SOCKET    41
 %define SYS_ACCEPT    43
 %define SYS_BIND      49
@@ -29,6 +51,7 @@
 %define SYS_EXIT      60
 %define SYS_FTRUNCATE 77
 %define SYS_MKDIR     83
+%define SYS_TIME      201
 
 %define SYS_EPOLL_WAIT  232
 %define SYS_EPOLL_CTL   233
@@ -63,3 +86,9 @@
         pop rdi
         pop rax
 %endmacro
+
+; -----------------------------------------------------------------------------
+; Zero-cost System V AMD64 ABI syscall macros (DO_SYS_WRITE, SYSCALL, ...).
+; Included here so every module that pulls in config.inc gets them transitively.
+; -----------------------------------------------------------------------------
+%include "syscalls.inc"

@@ -5,6 +5,8 @@
 //                 Goroutines to bypass client-side HTTP allocation overhead.
 //                 Provides metrics for pub, sub, batch, and mpub throughput.
 //                 Updated for v1.3.0 (Stream Processing & Routing Keys).
+//                 Fails the pipeline (exit 1) on any error, and can run a
+//                 post-stress healthcheck via --verify.
 // ============================================================================
 
 package main
@@ -80,7 +82,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	mode := os.Args[1]
+	// Parse arguments: the mode, plus optional --verify and -duration=SECONDS.
+	mode := ""
+	verify := false
+	dur := duration
+	for _, arg := range os.Args[1:] {
+		switch {
+		case arg == "--verify":
+			verify = true
+		case strings.HasPrefix(arg, "-duration="):
+			if _, err := fmt.Sscanf(arg, "-duration=%d", &dur); err != nil || dur <= 0 {
+				fmt.Fprintf(os.Stderr, "invalid -duration: %s\n", arg)
+				os.Exit(1)
+			}
+		case arg == "pub" || arg == "sub" || arg == "batch" || arg == "mpub":
+			mode = arg
+		default:
+			printUsage()
+			os.Exit(1)
+		}
+	}
+	if mode == "" {
+		printUsage()
+		os.Exit(1)
+	}
+
 	var payload []byte
 
 	switch mode {
@@ -92,13 +118,10 @@ func main() {
 		payload = reqBatch
 	case "mpub":
 		payload = reqMPub
-	default:
-		printUsage()
-		os.Exit(1)
 	}
 
 	fmt.Printf("🚀 Starting High-Frequency Benchmark (%s)\n", mode)
-	fmt.Printf("Target: %s | Concurrency: %d | Duration: %ds\n", targetAddr, concurrency, duration)
+	fmt.Printf("Target: %s | Concurrency: %d | Duration: %ds\n", targetAddr, concurrency, dur)
 	if mode == "batch" || mode == "mpub" {
 		fmt.Printf("Batch Size: %d messages per request\n", batchSize)
 	}
@@ -110,11 +133,11 @@ func main() {
 	}
 
 	// Run for the specified duration
-	time.Sleep(time.Duration(duration) * time.Second)
+	time.Sleep(time.Duration(dur) * time.Second)
 
 	finalOps := atomic.LoadUint64(&opsCount)
 	finalErr := atomic.LoadUint64(&errCount)
-	rps := finalOps / uint64(duration)
+	rps := finalOps / uint64(dur)
 
 	fmt.Printf("✅ Benchmark Completed!\n")
 	fmt.Printf("Total Requests: %d\n", finalOps)
@@ -125,11 +148,66 @@ func main() {
 		fmt.Printf("Real Throughput: ~%d Messages/sec\n", rps*uint64(batchSize))
 	}
 	fmt.Println("---------------------------------------------------------")
-	os.Exit(0)
+
+	exitCode := 0
+
+	if finalErr > 0 {
+		fmt.Printf("❌ FAILED: %d errors detected during benchmark\n", finalErr)
+		exitCode = 1
+	}
+
+	// Post-stress stability probe: the engine must still serve /live and /stats
+	// after being hammered. This is what catches register-corruption hangs that
+	// leave the event loop alive but unresponsive.
+	if verify {
+		fmt.Println("🔍 Running post-stress healthcheck (--verify)...")
+		if !healthcheck() {
+			fmt.Printf("❌ FAILED: healthcheck after stress did not return 200\n")
+			exitCode = 1
+		}
+	}
+
+	os.Exit(exitCode)
 }
 
 func printUsage() {
-	fmt.Println("Usage: go run tests/bench.go [pub|sub|batch|mpub]")
+	fmt.Println("Usage: go run tests/bench.go [pub|sub|batch|mpub] [--verify] [-duration=SECONDS]")
+	fmt.Println("  --verify          After the hammer, probe /live and /stats; fail if not 200")
+	fmt.Println("  -duration=SECONDS Benchmark duration (default 10)")
+}
+
+// healthcheck probes /live and /stats and returns true only if both answer 200.
+func healthcheck() bool {
+	ok := true
+	for _, path := range []string{"/live", "/stats"} {
+		conn, err := net.Dial("tcp", targetAddr)
+		if err != nil {
+			fmt.Printf("❌ healthcheck %s: dial failed: %v\n", path, err)
+			return false
+		}
+		req := []byte("GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n")
+		if _, err := conn.Write(req); err != nil {
+			fmt.Printf("❌ healthcheck %s: write failed: %v\n", path, err)
+			conn.Close()
+			return false
+		}
+		buf := make([]byte, 4096)
+		n, err := conn.Read(buf)
+		conn.Close()
+		if err != nil || n == 0 {
+			fmt.Printf("❌ healthcheck %s: read failed (err=%v, n=%d)\n", path, err, n)
+			ok = false
+			continue
+		}
+		resp := string(buf[:n])
+		if !strings.HasPrefix(resp, "HTTP/1.1 200 ") && !strings.HasPrefix(resp, "HTTP/1.0 200 ") {
+			fmt.Printf("❌ healthcheck %s: expected HTTP 200 status line, got:\n%s\n", path, resp)
+			ok = false
+			continue
+		}
+		fmt.Printf("✅ healthcheck %s OK (200)\n", path)
+	}
+	return ok
 }
 
 func hammer(payload []byte) {

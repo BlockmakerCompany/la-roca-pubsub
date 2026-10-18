@@ -9,6 +9,7 @@
 extern registry_find
 extern create_new_topic
 extern publish_message
+extern avx2_supported          ; CPU feature flag set by detect_cpu_features
 
 section .data
     res_mpub_ok      db "HTTP/1.1 200 OK", 13, 10
@@ -22,6 +23,9 @@ section .data
     res_mpub_500     db "HTTP/1.1 500 Internal Server Error", 13, 10
                      db "Content-Length: 0", 13, 10, 13, 10
     res_mpub_500_len equ $ - res_mpub_500
+
+    ; Broadcast source for the AVX2 newline scanner
+    newline_char     db 10
 
 section .text
     global handle_mpub
@@ -184,7 +188,11 @@ handle_mpub:
     mov rdx, rcx                ; Remaining bytes in body
     xor r8, r8                  ; Current line length counter
 
-.find_newline:
+    cmp byte [avx2_supported], 1
+    je .find_newline_avx2       ; SIMD path if CPU + OS support AVX2
+
+; --- SCALAR FALLBACK: byte-at-a-time newline scan -----------------------------
+.find_newline_scalar:
     test rdx, rdx
     jz .inject_last             ; End of buffer reached without a final newline
 
@@ -194,7 +202,40 @@ handle_mpub:
     inc rsi
     inc r8
     dec rdx
-    jmp .find_newline
+    jmp .find_newline_scalar
+
+; --- AVX2 PATH: 32 bytes per clock cycle, O(1) delimiter offset via bsf --------
+.find_newline_avx2:
+    test rdx, rdx
+    jz .inject_last             ; End of buffer reached without a final newline
+
+    cmp rdx, 32
+    jb .find_newline_scalar     ; Tail (< 32 bytes) -> scalar
+
+    ; INVARIANT: [rsi] has >= 32 physically mapped bytes ahead. Guaranteed by
+    ; the 4096-byte request buffer plus RDX (bytes read) >= 32 at this point,
+    ; so the 32-byte load below never crosses an unmapped page boundary.
+    vpbroadcastb ymm1, byte [rel newline_char]  ; ymm1 = 32 copies of '\n'
+    vmovdqu ymm0, [rsi]                          ; Load 32 payload bytes
+    vpcmpeqb ymm2, ymm0, ymm1                    ; Parallel compare
+    vpmovmskb eax, ymm2                          ; 32-bit match bitmask
+    test eax, eax
+    jnz .avx2_found             ; At least one '\n' in this chunk
+
+    add rsi, 32                 ; No match: advance whole chunk
+    add r8, 32
+    sub rdx, 32
+    jmp .find_newline_avx2
+
+.avx2_found:
+    ; NOTE: use R10 (not RCX) — RCX is the live remaining-body counter here.
+    bsf r10d, eax               ; Index (0..31) of first '\n'. bsf (not tzcnt)
+                                ; is BMI1-agnostic: guaranteed on all x86-64.
+                                ; Safe because eax != 0 (jnz .avx2_found above).
+    add rsi, r10
+    add r8, r10
+    sub rdx, r10
+    ; Fall through to .process_line with RSI at '\n' and R8 = line length
 
 .process_line:
     test r8, r8
@@ -221,6 +262,8 @@ handle_mpub:
     mov rcx, rbx                ; Payload Pointer (Start of line)
     mov r8,  r9                 ; Payload Size (Without CRLF)
 
+    vzeroupper                  ; Clear YMM high bits before crossing into
+                                ; SSE code (avoid AVX->SSE transition penalty)
     call publish_message
 
     pop r8
@@ -256,6 +299,7 @@ handle_mpub:
     mov rdx, [rbp - 32]
     mov rcx, rbx
     mov r8, r9
+    vzeroupper                  ; Clear YMM high bits before crossing into SSE
     call publish_message
     jmp .send_200
 
@@ -263,34 +307,22 @@ handle_mpub:
     ; 5. RESPOND & EXIT
     ; =========================================================================
 .send_200:
-    mov rax, SYS_WRITE
-    mov rdi, r12
-    lea rsi, [rel res_mpub_ok]
-    mov rdx, res_mpub_ok_len
-    syscall
+    DO_SYS_WRITE r12, res_mpub_ok, res_mpub_ok_len
     jmp .exit
 
 .send_400:
-    mov rax, SYS_WRITE
-    mov rdi, r12
-    lea rsi, [rel res_mpub_400]
-    mov rdx, res_mpub_400_len
-    syscall
+    DO_SYS_WRITE r12, res_mpub_400, res_mpub_400_len
     jmp .exit
 
 .send_500:
-    mov rax, SYS_WRITE
-    mov rdi, r12
-    lea rsi, [rel res_mpub_500]
-    mov rdx, res_mpub_500_len
-    syscall
+    DO_SYS_WRITE r12, res_mpub_500, res_mpub_500_len
 
 .exit:
-    add rsp, 32                 ; Clear local stack variables
     pop rbx
     pop r15
     pop r14
     pop r13
     pop r12
+    add rsp, 32                 ; Clear local stack variables
     pop rbp
     ret
