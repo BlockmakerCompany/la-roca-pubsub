@@ -156,10 +156,7 @@ route_api:
 ; DISPATCH HANDLERS
 ; -----------------------------------------------------------------------------
 .send_400_error:
-    mov rax, SYS_WRITE
-    lea rsi, [rel res_400_bad_topic]
-    mov rdx, res_400_len
-    syscall
+    DO_SYS_WRITE rdi, res_400_bad_topic, res_400_len
     jmp .handled
 
 .call_live:
@@ -185,10 +182,7 @@ route_api:
     ; --- ELEGANT HTTP 400 FALLBACK ---
     ; Send HTTP 400 Bad Request for unsupported verbs or malformed URIs
     ; instead of closing the socket abruptly. This ensures HTTP/1.1 compliance.
-    mov rax, SYS_WRITE
-    lea rsi, [rel res_400_generic]
-    mov rdx, res_400_gen_len
-    syscall                     ; Write "400 Bad Request" to the socket
+    DO_SYS_WRITE rdi, res_400_generic, res_400_gen_len
     jmp .handled                ; Finalize cleanly
 
 .handled:

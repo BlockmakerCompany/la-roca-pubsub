@@ -47,7 +47,7 @@ $(TARGET): $(OBJECTS)
 
 # Assembly stage
 $(BUILD_DIR)/%.o: %.asm
-	$(ASM) $(ASMFLAGS) -i $(SRC_DIR)/ -i $(CORE_DIR)/ -o $@ $<
+	$(ASM) $(ASMFLAGS) -i $(SRC_DIR)/ -i $(CORE_DIR)/ -i $(SRC_DIR)/include/ -o $@ $<
 
 # Clean up build artifacts
 clean:
