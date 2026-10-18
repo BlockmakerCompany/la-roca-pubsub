@@ -16,6 +16,11 @@
 ;   - Do NOT pass register arguments aliased out of ABI order (a value living
 ;     in RDX must be the 3rd argument, not the 4th). Label arguments are
 ;     expanded to their ADDRESS; equ constants to their numeric value.
+;   - NON-PIE ONLY: a label argument expands to `mov reg, label`, which loads
+;     the ABSOLUTE address of the symbol (not `lea reg, [rel label]`). This is
+;     correct for the non-PIE link (ld without -pie), but will break silently
+;     if the binary is ever linked as PIE or .data/.bss moves. If that happens,
+;     switch label call-sites to `lea reg, [rel label]` (e.g. sockaddr, ep_event).
 ; -----------------------------------------------------------------------------
 
 ; -----------------------------------------------------------------------------

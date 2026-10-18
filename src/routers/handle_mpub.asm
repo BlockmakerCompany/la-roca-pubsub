@@ -204,7 +204,7 @@ handle_mpub:
     dec rdx
     jmp .find_newline_scalar
 
-; --- AVX2 PATH: 32 bytes per clock cycle, O(1) delimiter offset via tzcnt -----
+; --- AVX2 PATH: 32 bytes per clock cycle, O(1) delimiter offset via bsf --------
 .find_newline_avx2:
     test rdx, rdx
     jz .inject_last             ; End of buffer reached without a final newline
@@ -212,6 +212,9 @@ handle_mpub:
     cmp rdx, 32
     jb .find_newline_scalar     ; Tail (< 32 bytes) -> scalar
 
+    ; INVARIANT: [rsi] has >= 32 physically mapped bytes ahead. Guaranteed by
+    ; the 4096-byte request buffer plus RDX (bytes read) >= 32 at this point,
+    ; so the 32-byte load below never crosses an unmapped page boundary.
     vpbroadcastb ymm1, byte [rel newline_char]  ; ymm1 = 32 copies of '\n'
     vmovdqu ymm0, [rsi]                          ; Load 32 payload bytes
     vpcmpeqb ymm2, ymm0, ymm1                    ; Parallel compare
@@ -226,7 +229,9 @@ handle_mpub:
 
 .avx2_found:
     ; NOTE: use R10 (not RCX) — RCX is the live remaining-body counter here.
-    tzcnt r10d, eax             ; Index (0..31) of first '\n' — safe, eax != 0
+    bsf r10d, eax               ; Index (0..31) of first '\n'. bsf (not tzcnt)
+                                ; is BMI1-agnostic: guaranteed on all x86-64.
+                                ; Safe because eax != 0 (jnz .avx2_found above).
     add rsi, r10
     add r8, r10
     sub rdx, r10
@@ -257,6 +262,8 @@ handle_mpub:
     mov rcx, rbx                ; Payload Pointer (Start of line)
     mov r8,  r9                 ; Payload Size (Without CRLF)
 
+    vzeroupper                  ; Clear YMM high bits before crossing into
+                                ; SSE code (avoid AVX->SSE transition penalty)
     call publish_message
 
     pop r8
@@ -292,6 +299,7 @@ handle_mpub:
     mov rdx, [rbp - 32]
     mov rcx, rbx
     mov r8, r9
+    vzeroupper                  ; Clear YMM high bits before crossing into SSE
     call publish_message
     jmp .send_200
 

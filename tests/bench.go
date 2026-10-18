@@ -91,7 +91,10 @@ func main() {
 		case arg == "--verify":
 			verify = true
 		case strings.HasPrefix(arg, "-duration="):
-			fmt.Sscanf(arg, "-duration=%d", &dur)
+			if _, err := fmt.Sscanf(arg, "-duration=%d", &dur); err != nil || dur <= 0 {
+				fmt.Fprintf(os.Stderr, "invalid -duration: %s\n", arg)
+				os.Exit(1)
+			}
 		case arg == "pub" || arg == "sub" || arg == "batch" || arg == "mpub":
 			mode = arg
 		default:
@@ -196,8 +199,9 @@ func healthcheck() bool {
 			ok = false
 			continue
 		}
-		if !strings.Contains(string(buf[:n]), "200") {
-			fmt.Printf("❌ healthcheck %s: expected HTTP 200, got:\n%s\n", path, string(buf[:n]))
+		resp := string(buf[:n])
+		if !strings.HasPrefix(resp, "HTTP/1.1 200 ") && !strings.HasPrefix(resp, "HTTP/1.0 200 ") {
+			fmt.Printf("❌ healthcheck %s: expected HTTP 200 status line, got:\n%s\n", path, resp)
 			ok = false
 			continue
 		}

@@ -16,8 +16,6 @@ section .text
 ; Clobbers volatile registers only (RAX, RBX, RCX, RDX).
 ; -----------------------------------------------------------------------------
 detect_cpu_features:
-    push rbp
-    mov rbp, rsp
     push rbx                    ; CPUID clobbers RBX
     push rcx
     push rdx
@@ -52,5 +50,4 @@ detect_cpu_features:
     pop rdx
     pop rcx
     pop rbx
-    pop rbp
     ret
