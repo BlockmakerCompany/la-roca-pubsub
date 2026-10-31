@@ -1,0 +1,2 @@
+GET /stats HTTP/1.1
+

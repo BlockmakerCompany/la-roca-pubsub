@@ -11,6 +11,7 @@ section .data
     global rt_key_size          ; NEW: Global configuration for key size
     global MAX_TOPICS
     global boot_time            ; Used for uptime metrics calculation
+    global avx2_supported       ; CPU feature flag: 0 = scalar fallback, 1 = AVX2
 
     ; Default Geometry & Engine Limits
     rt_msg_size         dq 256
@@ -18,6 +19,7 @@ section .data
     rt_key_size         dq 16           ; Default Key Size (16 bytes / 128-bit SIMD aligned)
     MAX_TOPICS          dq 8
     boot_time           dq 0            ; Populated dynamically during _start (boot time)
+    avx2_supported      db 0            ; Set by detect_cpu_features at boot
 
     ; io_uring global state (Asynchronous DMA)
     global worker_uring_sq_ptr

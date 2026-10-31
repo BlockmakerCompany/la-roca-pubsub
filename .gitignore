@@ -49,3 +49,5 @@ vgcore.*
 # --- Miscellaneous Build Artifacts ---
 # In case of manual out-of-tree compilations
 micro-pubsub
+# AFL++ findings (do not commit)
+tests/findings/
